@@ -1,3 +1,5 @@
+#❗Not yet complete still in development
+
 # System Monitor App 🖥️
 
 A simple lightweight C++ system monitor application built for learning front-end and back-end web development integration.
