@@ -1,14 +1,16 @@
-#define _CRT_SECURE_NO_WARNINGS
-#pragma comment(linker, "/subsystem:windows /ENTRY:mainCRTStartup")
+#define _CRT_SECURE_NO_WARNINGS //ignore deprecated warnings for functions like sprintf, strcpy, etc.
+#pragma comment(linker, "/subsystem:windows /ENTRY:mainCRTStartup") // tell the compiler this is a windows application and not a console application, but still use main() as the entry point
 
+// both window libaries that used for capture pc details
 #include <winsock2.h>
 #include <windows.h>
-#include <mmsystem.h>
-#pragma comment(lib, "winmm.lib")
-#include "resource.h"
-#include <thread>
-#include <sysinfoapi.h>
-#include <processthreadsapi.h>
+#include <mmsystem.h> // for PlaySound
+#pragma comment(lib, "winmm.lib") // auto link winmm.lib for PlaySound
+
+#include "resource.h" // load resources like images and sounds
+#include <thread> // for running the web server in a separate thread
+#include <sysinfoapi.h> // for getting RAM usage
+#include <processthreadsapi.h> // for getting CPU usage
 
 #include <iostream>
 #include <fstream>
@@ -19,102 +21,108 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 
+// tell crow to use standalone ASIO (no Boost dependency)
 #define ASIO_STANDALONE
 #define CROW_MAIN
 #include "crow.h"
 
+// tell webview to use WinAPI backend
 #define WEBVIEW_WINAPI
 #include "webview.h"
 
+// read resouce data from the .exe ram that was compiled with the resources
 std::string GetResourceData(int resourceId, const char* resourceType) {
-    HMODULE hModule = GetModuleHandle(NULL);
+	HMODULE hModule = GetModuleHandle(NULL); // get the handle to the current module (the .exe file)
     HRSRC hRes = FindResourceA(hModule, MAKEINTRESOURCEA(resourceId), resourceType);
-    if (!hRes) return "";
-    HGLOBAL hData = LoadResource(hModule, hRes);
-    DWORD size = SizeofResource(hModule, hRes);
-    char* data = (char*)LockResource(hData);
-    if (!data || size == 0) return "";
+	if (!hRes) return ""; // if the resource is not found, return an empty string
+	HGLOBAL hData = LoadResource(hModule, hRes); // load the resource into memory
+	DWORD size = SizeofResource(hModule, hRes); // get the size of the resource
+	char* data = (char*)LockResource(hData); // lock the resource in memory and get a pointer to it
+	if (!data || size == 0) return ""; // if the resource is empty, return an empty string
     return std::string(data, size);
 }
 
-struct nvmlUtilization_t {
+struct nvmlUtilization_t { // structure to hold GPU utilization rates
     unsigned int gpu;
     unsigned int memory;
 };
 
-typedef int (*nvmlInit_t)();
-typedef int (*nvmlShutdown_t)();
-typedef int (*nvmlDeviceGetHandleByIndex_t)(unsigned int index, void** device);
-typedef int (*nvmlDeviceGetTemperature_t)(void* device, int sensorType, unsigned int* temp);
-typedef int (*nvmlDeviceGetUtilizationRates_t)(void* device, nvmlUtilization_t* rates);
+// NVML temperature sensor types
+typedef int (*nvmlInit_t)(); // function pointer type for nvmlInit
+typedef int (*nvmlShutdown_t)(); // function pointer type for nvmlShutdown
+typedef int (*nvmlDeviceGetHandleByIndex_t)(unsigned int index, void** device); // function pointer type for nvmlDeviceGetHandleByIndex
+typedef int (*nvmlDeviceGetTemperature_t)(void* device, int sensorType, unsigned int* temp); // function pointer type for nvmlDeviceGetTemperature
+typedef int (*nvmlDeviceGetUtilizationRates_t)(void* device, nvmlUtilization_t* rates); // function pointer type for nvmlDeviceGetUtilizationRates
 
 void GetGpuStats(double& usageOut, double& tempOut) {
     usageOut = 0.0;
     tempOut = 0.0;
 
-    HMODULE hNvml = LoadLibraryA("nvml.dll");
+	HMODULE hNvml = LoadLibraryA("nvml.dll"); // load the NVIDIA Management Library (NVML) dynamically
     if (!hNvml) return;
 
-    auto nvmlInit = (nvmlInit_t)GetProcAddress(hNvml, "nvmlInit_v2");
-    if (!nvmlInit) nvmlInit = (nvmlInit_t)GetProcAddress(hNvml, "nvmlInit");
+	auto nvmlInit = (nvmlInit_t)GetProcAddress(hNvml, "nvmlInit_v2"); // get the address of the nvmlInit_v2 function
+	if (!nvmlInit) nvmlInit = (nvmlInit_t)GetProcAddress(hNvml, "nvmlInit"); // fallback to nvmlInit if nvmlInit_v2 is not found
 
-    auto nvmlShutdown = (nvmlShutdown_t)GetProcAddress(hNvml, "nvmlShutdown");
-    auto nvmlGetHandle = (nvmlDeviceGetHandleByIndex_t)GetProcAddress(hNvml, "nvmlDeviceGetHandleByIndex_v2");
-    if (!nvmlGetHandle) nvmlGetHandle = (nvmlDeviceGetHandleByIndex_t)GetProcAddress(hNvml, "nvmlDeviceGetHandleByIndex");
+	auto nvmlShutdown = (nvmlShutdown_t)GetProcAddress(hNvml, "nvmlShutdown"); // get the address of the nvmlShutdown function
+	auto nvmlGetHandle = (nvmlDeviceGetHandleByIndex_t)GetProcAddress(hNvml, "nvmlDeviceGetHandleByIndex_v2"); // get the address of the nvmlDeviceGetHandleByIndex_v2 function
+	if (!nvmlGetHandle) nvmlGetHandle = (nvmlDeviceGetHandleByIndex_t)GetProcAddress(hNvml, "nvmlDeviceGetHandleByIndex"); // fallback to nvmlDeviceGetHandleByIndex if nvmlDeviceGetHandleByIndex_v2 is not found
 
-    auto nvmlGetTemp = (nvmlDeviceGetTemperature_t)GetProcAddress(hNvml, "nvmlDeviceGetTemperature");
-    auto nvmlGetUtil = (nvmlDeviceGetUtilizationRates_t)GetProcAddress(hNvml, "nvmlDeviceGetUtilizationRates");
+	auto nvmlGetTemp = (nvmlDeviceGetTemperature_t)GetProcAddress(hNvml, "nvmlDeviceGetTemperature"); // get the address of the nvmlDeviceGetTemperature function
+	auto nvmlGetUtil = (nvmlDeviceGetUtilizationRates_t)GetProcAddress(hNvml, "nvmlDeviceGetUtilizationRates"); // get the address of the nvmlDeviceGetUtilizationRates function
 
-    if (nvmlInit && nvmlInit() == 0) {
-        void* device = nullptr;
-        if (nvmlGetHandle && nvmlGetHandle(0, &device) == 0 && device) {
-            unsigned int temp = 0;
-            if (nvmlGetTemp && nvmlGetTemp(device, 0, &temp) == 0) {
-                tempOut = (double)temp;
+	// Initialize NVML and get GPU stats
+	if (nvmlInit && nvmlInit() == 0) { // if nvmlInit is successful
+		void* device = nullptr; // pointer to hold the GPU device handle
+		if (nvmlGetHandle && nvmlGetHandle(0, &device) == 0 && device) { // if nvmlGetHandle is successful and device is valid
+			unsigned int temp = 0; // variable to hold the GPU temperature
+			if (nvmlGetTemp && nvmlGetTemp(device, 0, &temp) == 0) { // if nvmlGetTemp is successful
+				tempOut = (double)temp; // set the output temperature
             }
 
-            nvmlUtilization_t util = { 0 };
-            if (nvmlGetUtil && nvmlGetUtil(device, &util) == 0) {
-                usageOut = (double)util.gpu;
+			nvmlUtilization_t util = { 0 }; // structure to hold the GPU utilization rates
+			if (nvmlGetUtil && nvmlGetUtil(device, &util) == 0) { // if nvmlGetUtil is successful
+				usageOut = (double)util.gpu; // set the output GPU usage
             }
         }
-        if (nvmlShutdown) nvmlShutdown();
+		if (nvmlShutdown) nvmlShutdown(); // shutdown NVML
     }
 
-    FreeLibrary(hNvml);
+	FreeLibrary(hNvml); // free the NVML library
 }
 
-std::string GetRealCpuName() {
-    HKEY hKey;
-    char cpuName[256] = "Unknown CPU";
-    DWORD bufSize = sizeof(cpuName);
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        RegQueryValueExA(hKey, "ProcessorNameString", NULL, NULL, (LPBYTE)cpuName, &bufSize);
+std::string GetRealCpuName() { // function to get the real CPU name from the Windows registry
+	HKEY hKey; // handle to the registry key
+	char cpuName[256] = "Unknown CPU"; // buffer to hold the CPU name
+	DWORD bufSize = sizeof(cpuName); // size of the buffer
+	// Open the registry key for the CPU name
+	if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", 0, KEY_READ, &hKey) == ERROR_SUCCESS) { // if the key is opened successfully
+		RegQueryValueExA(hKey, "ProcessorNameString", NULL, NULL, (LPBYTE)cpuName, &bufSize); // query the value of the CPU name
         RegCloseKey(hKey);
     }
     return std::string(cpuName);
 }
 
-std::string GetRealTotalRam() {
-    MEMORYSTATUSEX memInfo;
-    memInfo.dwLength = sizeof(MEMORYSTATUSEX);
-    GlobalMemoryStatusEx(&memInfo);
-    double totalGB = (double)memInfo.ullTotalPhys / (1024.0 * 1024.0 * 1024.0);
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%.1f GB", totalGB);
+std::string GetRealTotalRam() { // function to get the total RAM size in GB
+	MEMORYSTATUSEX memInfo; // structure to hold memory status information
+	memInfo.dwLength = sizeof(MEMORYSTATUSEX); // set the size of the structure
+	GlobalMemoryStatusEx(&memInfo); // get the memory status information
+	double totalGB = (double)memInfo.ullTotalPhys / (1024.0 * 1024.0 * 1024.0); // convert total physical memory from bytes to gigabytes
+	char buf[32]; // buffer to hold the formatted string
+	snprintf(buf, sizeof(buf), "%.1f GB", totalGB); // format the total RAM size to one decimal place and store it in the buffer
     return std::string(buf);
 }
 
-std::string GetRealGpuName() {
-    DISPLAY_DEVICEA dd;
-    ZeroMemory(&dd, sizeof(dd));
-    dd.cb = sizeof(dd);
-    for (DWORD i = 0; EnumDisplayDevicesA(NULL, i, &dd, 0); i++) {
-        if (dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) {
+std::string GetRealGpuName() { // function to get the real GPU name using EnumDisplayDevices
+	DISPLAY_DEVICEA dd; // structure to hold display device information
+	ZeroMemory(&dd, sizeof(dd)); // initialize the structure to zero
+	dd.cb = sizeof(dd); // set the size of the structure
+	for (DWORD i = 0; EnumDisplayDevicesA(NULL, i, &dd, 0); i++) { // enumerate display devices
+		if (dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) { // if the device is the primary display device
             return std::string(dd.DeviceString);
         }
     }
-    if (EnumDisplayDevicesA(NULL, 0, &dd, 0)) {
+	if (EnumDisplayDevicesA(NULL, 0, &dd, 0)) { // fallback to the first display device if no primary device is found
         return std::string(dd.DeviceString);
     }
     return "Unknown GPU";
@@ -122,63 +130,63 @@ std::string GetRealGpuName() {
 
 double GetRamUsage() {
     MEMORYSTATUSEX memInfo;
-    memInfo.dwLength = sizeof(MEMORYSTATUSEX);
-    GlobalMemoryStatusEx(&memInfo);
-    DWORDLONG totalPhysMem = memInfo.ullTotalPhys;
-    DWORDLONG physMemUsed = memInfo.ullTotalPhys - memInfo.ullAvailPhys;
-    return ((double)physMemUsed / (double)totalPhysMem * 100.0);
+    memInfo.dwLength = sizeof(MEMORYSTATUSEX); // set the size of the structure
+    GlobalMemoryStatusEx(&memInfo); // get the memory status information
+	DWORDLONG totalPhysMem = memInfo.ullTotalPhys; // total physical memory in bytes
+	DWORDLONG physMemUsed = memInfo.ullTotalPhys - memInfo.ullAvailPhys; // used physical memory in bytes
+	return ((double)physMemUsed / (double)totalPhysMem * 100.0); // calculate the RAM usage percentage
 }
 
 class CpuUsage {
 private:
-    ULARGE_INTEGER lastIdleTime, lastKernelTime, lastUserTime;
-    void filetime_to_ularge(const FILETIME& ft, ULARGE_INTEGER& ul) {
-        ul.LowPart = ft.dwLowDateTime;
-        ul.HighPart = ft.dwHighDateTime;
+	ULARGE_INTEGER lastIdleTime, lastKernelTime, lastUserTime; // store the last recorded CPU times
+	void filetime_to_ularge(const FILETIME& ft, ULARGE_INTEGER& ul) { // convert FILETIME to ULARGE_INTEGER
+		ul.LowPart = ft.dwLowDateTime; // set the low part of the ULARGE_INTEGER
+		ul.HighPart = ft.dwHighDateTime; // set the high part of the ULARGE_INTEGER
     }
 public:
     CpuUsage() {
-        FILETIME idleTime, kernelTime, userTime;
-        GetSystemTimes(&idleTime, &kernelTime, &userTime);
-        filetime_to_ularge(idleTime, lastIdleTime);
-        filetime_to_ularge(kernelTime, lastKernelTime);
-        filetime_to_ularge(userTime, lastUserTime);
+		FILETIME idleTime, kernelTime, userTime; // get the initial CPU times
+		GetSystemTimes(&idleTime, &kernelTime, &userTime); // get the system times for idle, kernel, and user
+		filetime_to_ularge(idleTime, lastIdleTime); // convert and store the last idle time
+		filetime_to_ularge(kernelTime, lastKernelTime); // convert and store the last kernel time
+		filetime_to_ularge(userTime, lastUserTime); // convert and store the last user time
     }
     double GetCpuUsage() {
         FILETIME idleTime, kernelTime, userTime;
         GetSystemTimes(&idleTime, &kernelTime, &userTime);
 
-        ULARGE_INTEGER idle, kernel, user;
-        filetime_to_ularge(idleTime, idle);
+		ULARGE_INTEGER idle, kernel, user; // convert the FILETIME values to ULARGE_INTEGER for calculations
+		filetime_to_ularge(idleTime, idle);
         filetime_to_ularge(kernelTime, kernel);
         filetime_to_ularge(userTime, user);
 
-        ULONGLONG sysIdleDiff = idle.QuadPart - lastIdleTime.QuadPart;
-        ULONGLONG sysKernelDiff = kernel.QuadPart - lastKernelTime.QuadPart;
-        ULONGLONG sysUserDiff = user.QuadPart - lastUserTime.QuadPart;
+		ULONGLONG sysIdleDiff = idle.QuadPart - lastIdleTime.QuadPart; // calculate the difference in idle time since the last measurement
+		ULONGLONG sysKernelDiff = kernel.QuadPart - lastKernelTime.QuadPart; // calculate the difference in kernel time since the last measurement
+		ULONGLONG sysUserDiff = user.QuadPart - lastUserTime.QuadPart; // calculate the difference in user time since the last measurement
 
         lastIdleTime = idle;
         lastKernelTime = kernel;
         lastUserTime = user;
 
-        ULONGLONG totalSys = sysKernelDiff + sysUserDiff;
+		ULONGLONG totalSys = sysKernelDiff + sysUserDiff; // calculate the total system time since the last measurement
         if (totalSys == 0) return 0.0;
 
-        double cpuUsage = (1.0 - ((double)sysIdleDiff / (double)totalSys)) * 100.0;
-        return cpuUsage < 0.0 ? 0.0 : (cpuUsage > 100.0 ? 100.0 : cpuUsage);
+		double cpuUsage = (1.0 - ((double)sysIdleDiff / (double)totalSys)) * 100.0; // calculate the CPU usage percentage
+		return cpuUsage < 0.0 ? 0.0 : (cpuUsage > 100.0 ? 100.0 : cpuUsage); // clamp the CPU usage percentage between 0 and 100
     }
 };
 
-CpuUsage cpuUsage;
+CpuUsage cpuUsage; // create a global instance of the CpuUsage class to track CPU usage over time
 
 void StartServer() {
-    crow::SimpleApp app;
+	crow::SimpleApp app; // create a simple Crow application
 
-    CROW_ROUTE(app, "/assets/mascot.jpg")
+	CROW_ROUTE(app, "/assets/mascot.jpg") // route to serve the mascot image
         ([]() {
-        std::string imgData = GetResourceData(IDR_MASCOT1_IMG, MAKEINTRESOURCEA(10)); // RT_RCDATA = 10
-        crow::response res(imgData);
-        res.set_header("Content-Type", "image/jpeg");
+		std::string imgData = GetResourceData(IDR_MASCOT1_IMG, MAKEINTRESOURCEA(10)); // RT_RCDATA = 10
+		crow::response res(imgData); // create a response with the image data
+		res.set_header("Content-Type", "image/jpeg"); // set the content type header to image/jpeg
         return res;
             });
 
@@ -190,19 +198,19 @@ void StartServer() {
         return res;
             });
 
-    CROW_ROUTE(app, "/api/stats")
+	CROW_ROUTE(app, "/api/stats") // route to serve the system stats as JSON
         ([]() {
         double gpuUsage = 0.0, gpuTemp = 0.0;
         GetGpuStats(gpuUsage, gpuTemp);
-        crow::json::wvalue res;
+		crow::json::wvalue res; // create a JSON response object
         res["ramUsage"] = GetRamUsage();
         res["cpuUsage"] = cpuUsage.GetCpuUsage();
         res["gpuUsage"] = gpuUsage;
         res["gpuTemp"] = gpuTemp;
-        return res;
+		return res; // return the JSON response
             });
 
-    CROW_ROUTE(app, "/api/specs")
+	CROW_ROUTE(app, "/api/specs") // route to serve the system specs as JSON
         ([]() {
         crow::json::wvalue res;
         res["cpuName"] = GetRealCpuName();
@@ -211,8 +219,9 @@ void StartServer() {
         return res;
             });
 
-    CROW_ROUTE(app, "/")
+	CROW_ROUTE(app, "/") // route to serve the main HTML page
         ([]() {
+		// return the HTML page as a raw string
         auto page = crow::response(R"rawhtml(
             <!DOCTYPE html>
             <html lang="en">
@@ -278,7 +287,7 @@ void StartServer() {
                         transition: all 0.3s ease;
                         cursor: default;
                     }
-                    .card:hover { 
+                    .card:hover {
                         transform: translateY(-3px); 
                         box-shadow: 0 12px 35px rgba(0, 0, 0, 0.5);
                     }
@@ -457,39 +466,39 @@ void StartServer() {
             </body>
             </html>
         )rawhtml");
-        page.set_header("Content-Type", "text/html");
+		page.set_header("Content-Type", "text/html"); // set the content type header to text/html
         return page;
             });
 
-    app.port(18080).multithreaded().run();
+    app.port(18080).multithreaded().run(); // run the Crow application on port 18080 with multithreading enabled
 }
 
 int main() {
-    PlaySound(MAKEINTRESOURCE(IDR_START_WAVE), GetModuleHandle(NULL), SND_RESOURCE | SND_ASYNC);
+	PlaySound(MAKEINTRESOURCE(IDR_START_WAVE), GetModuleHandle(NULL), SND_RESOURCE | SND_ASYNC); // play the startup sound asynchronously
 
-    std::thread serverThread(StartServer);
-    serverThread.detach();
+	std::thread serverThread(StartServer); // start the web server in a separate thread
+	serverThread.detach(); // detach the server thread so it runs independently
 
     Sleep(500);
 
-    webview::webview w(false, nullptr);
+	webview::webview w(false, nullptr); // create a webview window (not resizable, no parent window)
     w.set_title("System Hardware Monitor");
-    w.set_size(1200, 600, WEBVIEW_HINT_NONE);
+    w.set_size(1600, 900, WEBVIEW_HINT_NONE);
     w.navigate("http://127.0.0.1:18080");
     
-    HWND hwnd = FindWindowA(nullptr, "System Hardware Monitor");
+	HWND hwnd = FindWindowA(nullptr, "System Hardware Monitor"); // find the window handle of the webview window by its title
     if (hwnd) {
         HICON hIcon = (HICON)LoadImageA(
-            GetModuleHandle(NULL),
-            MAKEINTRESOURCEA(IDI_APP_ICON),
-            IMAGE_ICON,
-            GetSystemMetrics(SM_CXICON),
-            GetSystemMetrics(SM_CYICON),
-            LR_DEFAULTCOLOR
+			GetModuleHandle(NULL), // load the icon from the resources
+			MAKEINTRESOURCEA(IDI_APP_ICON), // the resource ID of the icon
+			IMAGE_ICON, // specify that we are loading an icon
+			GetSystemMetrics(SM_CXICON), // get the width of the icon
+			GetSystemMetrics(SM_CYICON), // get the height of the icon
+			LR_DEFAULTCOLOR // use the default color format for the icon
         );
         if (hIcon) {
-            SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
-            SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
+			SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon); // set the big icon for the window
+			SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon); // set the small icon for the window
         }
     }
     
