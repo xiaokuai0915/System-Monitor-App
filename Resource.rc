@@ -1,0 +1,39 @@
+// Microsoft Visual Studio generated resource script.
+//
+#include "resource.h"
+#include <winres.h>
+
+#undef APSTUDIO_READONLY_SYMBOLS
+
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_ENU)
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+#pragma code_page(1252)
+
+#ifdef APSTUDIO_INVOKED
+1 TEXTINCLUDE 
+BEGIN
+    "resource.h\0"
+END
+
+2 TEXTINCLUDE 
+BEGIN
+    "#include <winres.h>\r\n"
+    "\0"
+END
+
+3 TEXTINCLUDE 
+BEGIN
+    "\r\n"
+    "\0"
+END
+#endif
+
+#endif
+
+#ifndef APSTUDIO_INVOKED
+#endif
+
+IDI_APP_ICON            ICON                    "assets/app.ico"
+IDR_START_WAVE          WAVE                    "assets/start.wav"
+IDR_MASCOT1_IMG         RCDATA                  "assets/mascot.jpg"
+IDR_MASCOT2_IMG         RCDATA                  "assets/mascot2.jpg"
