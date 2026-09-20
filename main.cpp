@@ -345,7 +345,7 @@ void StartServer() {
 		res["gpuNames"] = GetRealGpuName();
 		return res;
 			});
-	
+
 	CROW_ROUTE(app, "/api/play_voice")
 		([]() {
 		PlayRandomVoiceLine();
@@ -443,15 +443,20 @@ void StartServer() {
 					body.specs-mode .card h3 { color: #7dd3fc; }
 					body.specs-mode .card .value { color: #38bdf8; }
 
-					.switch-btn {
+					.controls-bar {
 						position: fixed;
 						bottom: 35px;
 						left: 60px;
 						z-index: 10;
+						display: flex;
+						gap: 12px;
+					}
+
+					.switch-btn {
 						background: rgba(22, 16, 28, 0.8);
 						border: 1px solid rgba(255, 120, 50, 0.4);
 						color: #ffab76;
-						padding: 12px 26px;
+						padding: 12px 22px;
 						border-radius: 24px;
 						cursor: pointer;
 						font-size: 0.88rem;
@@ -470,6 +475,30 @@ void StartServer() {
 						color: #7dd3fc;
 					}
 					body.specs-mode .switch-btn:hover { background: rgba(56, 189, 248, 0.15); }
+
+					.version-tag {
+						position: fixed;
+						bottom: 25px;
+						right: 30px;
+						z-index: 10;
+						font-size: 0.85rem;
+						color: rgba(255, 255, 255, 0.45);
+						text-decoration: none;
+						font-weight: 600;
+						letter-spacing: 0.5px;
+						padding: 6px 12px;
+						border-radius: 12px;
+						background: rgba(0, 0, 0, 0.2);
+						backdrop-filter: blur(8px);
+						border: 1px solid rgba(255, 255, 255, 0.08);
+						transition: all 0.3s ease;
+					}
+					.version-tag:hover {
+						color: #38bdf8;
+						background: rgba(56, 189, 248, 0.15);
+						border-color: rgba(56, 189, 248, 0.3);
+						transform: translateY(-2px);
+					}
 				</style>
 			</head>
 			<body oncontextmenu="return false;">
@@ -501,16 +530,28 @@ void StartServer() {
 					</div>
 				</div>
 
-				<button class="switch-btn" id="btn-toggle" onclick="toggleView()">
-					&#x21BB; Show System Hardware Specs
-				</button>
+				<div class="controls-bar">
+					<button class="switch-btn" id="btn-toggle" onclick="toggleView()">
+						&#x21BB; Show System Hardware Specs
+					</button>
+					<button class="switch-btn" onclick="playVoice()">
+						&#128266; Voice
+					</button>
+				</div>
+
+				<a href="https://github.com/xiaokuai0915/System-Monitor-App" target="_blank" class="version-tag">
+					v1.1.1
+				</a>
 
 				<script>
 					let isSpecsView = false;
 					let cachedSpecs = null;
 
-					function toggleView() {
+					function playVoice() {
 						fetch('/api/play_voice').catch(err => console.error(err));
+					}
+
+					function toggleView() {
 						isSpecsView = !isSpecsView;
 						const body = document.body;
 						const grid = document.getElementById('cards-grid');
