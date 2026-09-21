@@ -9,6 +9,7 @@
 
 #include "resource.h" // load resources like images and sounds
 #include <thread> // for running the web server in a separate thread
+#include <atomic>
 #include <sysinfoapi.h> // for getting RAM usage
 #include <processthreadsapi.h> // for getting CPU usage
 
@@ -32,6 +33,65 @@
 // tell webview to use WinAPI backend
 #define WEBVIEW_WINAPI
 #include "webview.h"
+
+enum AppMode {
+	MODE_WINDOW = 0,
+	MODE_OVERLAY = 1
+};
+
+std::atomic<AppMode> g_currentMode{ MODE_WINDOW };
+HWND g_hwndWebview = NULL;
+WNDPROC g_oldWndProc = NULL;
+
+LRESULT CALLBACK SubclassWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+	if (g_currentMode == MODE_OVERLAY) {
+		if (uMsg == WM_SHOWWINDOW && wParam == FALSE) {
+			return 0;
+		}
+
+		if (uMsg == WM_SYSCOMMAND && (wParam & 0xFFF0) == SC_MINIMIZE) {
+			return 0;
+		}
+
+		if (uMsg == WM_WINDOWPOSCHANGING) {
+			WINDOWPOS* pos = (WINDOWPOS*)lParam;
+			if (pos->flags & SWP_HIDEWINDOW) {
+				pos->flags &= ~SWP_HIDEWINDOW;
+				pos->flags |= SWP_SHOWWINDOW;
+			}
+			pos->hwndInsertAfter = HWND_TOPMOST;
+		}
+	}
+	return CallWindowProc(g_oldWndProc, hwnd, uMsg, wParam, lParam);
+}
+
+void SetAppMode(AppMode mode) {
+	if (!g_hwndWebview) return;
+	g_currentMode = mode;
+
+	int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+	int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+
+	if (mode == MODE_WINDOW) {
+		SetWindowLong(g_hwndWebview, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+		SetWindowLong(g_hwndWebview, GWL_EXSTYLE, WS_EX_APPWINDOW);
+
+		int w = 1600, h = 900;
+		int x = (screenWidth - w) / 2;
+		int y = (screenHeight - h) / 2;
+		SetWindowPos(g_hwndWebview, HWND_NOTOPMOST, x, y, w, h, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+	}
+	else if (mode == MODE_OVERLAY) {
+		int width = 210;
+		int height = 75;
+		int x = 20;
+		int y = 20;
+
+		SetWindowLong(g_hwndWebview, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+		SetWindowLong(g_hwndWebview, GWL_EXSTYLE, WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE);
+		SetWindowPos(g_hwndWebview, HWND_TOPMOST, x, y, width, height, SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+	}
+}
 
 // read resouce data from the .exe ram that was compiled with the resources
 std::string GetResourceData(int resourceId, const char* resourceType) {
@@ -334,6 +394,7 @@ void StartServer() {
 		res["cpuUsage"] = cpuUsage.GetCpuUsage();
 		res["gpuUsage"] = gpuUsage;
 		res["gpuTemp"] = gpuTemp;
+		res["mode"] = (int)g_currentMode.load();
 		return res; // return the JSON response
 			});
 
@@ -352,6 +413,16 @@ void StartServer() {
 		return crow::response(200);
 			});
 
+	CROW_ROUTE(app, "/api/set_mode")
+		([](const crow::request& req) {
+		if (req.url_params.get("m")) {
+			std::string m = req.url_params.get("m");
+			if (m == "window") SetAppMode(MODE_WINDOW);
+			else if (m == "overlay") SetAppMode(MODE_OVERLAY);
+		}
+		return crow::response(200);
+			});
+
 	CROW_ROUTE(app, "/") // route to serve the main HTML page
 		([]() {
 		// return the HTML page as a raw string
@@ -364,52 +435,37 @@ void StartServer() {
 				<title>System Monitor</title>
 				<style>
 					* { box-sizing: border-box; margin: 0; padding: 0; }
-					body {
-						font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
-						height: 100vh;
+					
+					html, body {
 						width: 100vw;
-						display: flex;
-						align-items: center;
-						padding-left: 60px;
-						background: url('/assets/mascot.jpg') no-repeat center center / cover;
-						transition: background-image 0.6s ease-in-out;
-						color: #f1f5f9;
+						height: 100vh;
 						overflow: hidden;
-						position: relative;
-						user-select: none; 
+						background-color: #0b0813;
+						font-family: 'Consolas', 'Segoe UI', sans-serif;
+						color: #f1f5f9;
+						user-select: none;
 						-webkit-user-select: none;
 					}
 
-					.overlay {
-						position: absolute;
-						top: 0; left: 0; width: 100%; height: 100%;
+					/* --- 1. WINDOW MODE --- */
+					#window-ui {
+						width: 100%; height: 100%;
+						display: flex; align-items: center; padding-left: 60px;
+						background: url('/assets/mascot.jpg') no-repeat center center / cover;
+						transition: background-image 0.5s ease; position: relative;
+					}
+					#window-ui .overlay {
+						position: absolute; top: 0; left: 0; width: 100%; height: 100%;
 						background: linear-gradient(90deg, rgba(14, 10, 18, 0.9) 0%, rgba(14, 10, 18, 0.6) 45%, rgba(14, 10, 18, 0.1) 100%);
+						transition: background 0.5s ease;
 						z-index: 1;
-						transition: background 0.6s ease-in-out;
 					}
-
-					.container {
-						position: relative;
-						z-index: 2;
-						max-width: 500px;
-						width: 100%;
-					}
-
-					.header {
-						margin-bottom: 28px;
-						border-bottom: 2px solid rgba(255, 120, 50, 0.4);
-						padding-bottom: 12px;
-						transition: border-color 0.6s ease;
-					}
-					.header h1 { font-size: 2.3rem; color: #ff9d66; font-weight: 700; transition: color 0.6s ease; cursor: default; }
-					.header p { font-size: 0.95rem; color: #cbd5e1; margin-top: 4px; transition: color 0.6s ease; cursor: default; }
-
-					.grid-container {
-						display: grid;
-						grid-template-columns: repeat(2, 1fr);
-						gap: 18px;
-					}
-
+					#window-ui .container { position: relative; z-index: 2; max-width: 500px; width: 100%; }
+					.header { margin-bottom: 28px; border-bottom: 2px solid rgba(255, 120, 50, 0.4); padding-bottom: 12px; }
+					.header h1 { font-size: 2.3rem; color: #ff9d66; font-weight: 700; }
+					.header p { font-size: 0.95rem; color: #cbd5e1; margin-top: 4px; }
+					
+					.grid-container { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
 					.card {
 						background: rgba(22, 16, 28, 0.65);
 						border: 1px solid rgba(255, 120, 50, 0.25);
@@ -417,141 +473,150 @@ void StartServer() {
 						border-radius: 16px;
 						padding: 22px 24px;
 						box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
-						transition: all 0.3s ease;
-						cursor: default;
-					}
-					.card:hover {
-						transform: translateY(-3px); 
-						box-shadow: 0 12px 35px rgba(0, 0, 0, 0.5);
 					}
 					.card.full-width { grid-column: span 2; }
-
-					.card h3 { font-size: 0.8rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 8px; transition: color 0.6s ease; }
-					.card .value { font-size: 1.8rem; font-weight: 700; color: #ffab76; transition: color 0.6s ease; }
+					.card h3 { font-size: 0.8rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 8px; }
+					.card .value { font-size: 1.8rem; font-weight: 700; color: #ffab76; }
 					.card .unit { font-size: 1rem; color: #cbd5e1; font-weight: 400; }
 
-					body.specs-mode {
-						background-image: url('/assets/mascot2.jpg');
-					}
-					body.specs-mode .overlay {
-						background: linear-gradient(90deg, rgba(10, 22, 40, 0.85) 0%, rgba(10, 22, 40, 0.5) 50%, rgba(10, 22, 40, 0.05) 100%);
-					}
-					body.specs-mode .header { border-bottom-color: rgba(56, 189, 248, 0.4); }
-					body.specs-mode .header h1 { color: #38bdf8; }
-					body.specs-mode .header p { color: #bae6fd; }
-					body.specs-mode .card { background: rgba(12, 28, 48, 0.65); border-color: rgba(56, 189, 248, 0.25); }
-					body.specs-mode .card h3 { color: #7dd3fc; }
-					body.specs-mode .card .value { color: #38bdf8; }
-
-					.controls-bar {
-						position: fixed;
-						bottom: 35px;
-						left: 60px;
-						z-index: 10;
-						display: flex;
-						gap: 12px;
-					}
-
+					.controls-bar { position: fixed; bottom: 35px; left: 60px; z-index: 10; display: flex; gap: 12px; }
 					.switch-btn {
-						background: rgba(22, 16, 28, 0.8);
-						border: 1px solid rgba(255, 120, 50, 0.4);
-						color: #ffab76;
-						padding: 12px 22px;
-						border-radius: 24px;
-						cursor: pointer;
-						font-size: 0.88rem;
-						font-weight: 600;
-						backdrop-filter: blur(12px);
-						box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
-						transition: all 0.3s ease;
+						background: rgba(22, 16, 28, 0.8); border: 1px solid rgba(255, 120, 50, 0.4);
+						color: #ffab76; padding: 12px 22px; border-radius: 24px; cursor: pointer;
+						font-size: 0.88rem; font-weight: 600; backdrop-filter: blur(12px); transition: all 0.2s ease;
 					}
-					.switch-btn:hover {
-						transform: translateY(-2px) scale(1.03);
-						background: rgba(255, 120, 50, 0.15);
+					.switch-btn:hover { transform: translateY(-2px); background: rgba(255, 120, 50, 0.15); }
+					.version-tag {
+						position: fixed; bottom: 25px; right: 30px; z-index: 10; font-size: 0.85rem;
+						color: rgba(255, 255, 255, 0.45); text-decoration: none; padding: 6px 12px;
+						border-radius: 12px; background: rgba(0, 0, 0, 0.2); border: 1px solid rgba(255, 255, 255, 0.08);
 					}
+
+					/* --- SPECS MODE STYLES (完整深蓝视觉匹配) --- */
+					body.specs-mode #window-ui { background-image: url('/assets/mascot2.jpg'); }
+					body.specs-mode #window-ui .overlay {
+						background: linear-gradient(90deg, rgba(12, 24, 42, 0.92) 0%, rgba(12, 24, 42, 0.65) 45%, rgba(12, 24, 42, 0.15) 100%);
+					}
+					body.specs-mode #window-ui .header { border-bottom-color: rgba(56, 189, 248, 0.4); }
+					body.specs-mode #window-ui .header h1 { color: #38bdf8; }
+					body.specs-mode #window-ui .card { background: rgba(12, 28, 48, 0.65); border-color: rgba(56, 189, 248, 0.25); }
+					body.specs-mode #window-ui .card .value { color: #38bdf8; }
 					body.specs-mode .switch-btn {
 						background: rgba(12, 28, 48, 0.8);
 						border-color: rgba(56, 189, 248, 0.4);
-						color: #7dd3fc;
-					}
-					body.specs-mode .switch-btn:hover { background: rgba(56, 189, 248, 0.15); }
-
-					.version-tag {
-						position: fixed;
-						bottom: 25px;
-						right: 30px;
-						z-index: 10;
-						font-size: 0.85rem;
-						color: rgba(255, 255, 255, 0.45);
-						text-decoration: none;
-						font-weight: 600;
-						letter-spacing: 0.5px;
-						padding: 6px 12px;
-						border-radius: 12px;
-						background: rgba(0, 0, 0, 0.2);
-						backdrop-filter: blur(8px);
-						border: 1px solid rgba(255, 255, 255, 0.08);
-						transition: all 0.3s ease;
-					}
-					.version-tag:hover {
 						color: #38bdf8;
-						background: rgba(56, 189, 248, 0.15);
-						border-color: rgba(56, 189, 248, 0.3);
-						transform: translateY(-2px);
 					}
+					body.specs-mode .switch-btn:hover {
+						background: rgba(56, 189, 248, 0.2);
+					}
+					body.specs-mode .version-tag {
+						border-color: rgba(56, 189, 248, 0.2);
+						color: rgba(56, 189, 248, 0.7);
+					}
+
+					/* --- 2. OVERLAY MODE --- */
+					#overlay-ui {
+						display: none;
+						width: 100vw; height: 100vh;
+						background: #0d0e15;
+						border: 2px solid #00ff88;
+						border-radius: 8px;
+						padding: 8px 12px;
+						position: relative;
+						box-sizing: border-box;
+						cursor: move;
+						-webkit-app-region: drag;
+					}
+					.osd-grid {
+						display: grid;
+						grid-template-columns: repeat(2, 1fr);
+						gap: 4px 12px;
+						height: 100%;
+						align-content: center;
+					}
+					.osd-item { display: flex; align-items: center; gap: 6px; font-weight: bold; }
+					.osd-lbl { font-size: 0.72rem; color: #00ff88; }
+					.osd-val { font-size: 0.85rem; color: #ffffff; }
+
+					.restore-btn {
+						position: absolute; top: 4px; right: 6px;
+						background: rgba(255, 80, 40, 0.9); color: #fff;
+						border: none; border-radius: 4px; font-size: 0.65rem;
+						padding: 2px 6px; cursor: pointer; z-index: 99;
+						opacity: 0; transition: opacity 0.2s ease;
+						-webkit-app-region: no-drag;
+					}
+					#overlay-ui:hover .restore-btn { opacity: 1; }
+
+					body.overlay-mode #window-ui { display: none !important; }
+					body.overlay-mode #overlay-ui { display: flex !important; }
 				</style>
 			</head>
-			<body oncontextmenu="return false;">
-				<div class="overlay"></div>
-
-				<div class="container">
-					<div class="header">
-						<h1 id="panel-title">System Monitor</h1>
-						<p id="panel-subtitle">Live Hardware Performance Dashboard</p>
-					</div>
-
-					<div class="grid-container" id="cards-grid">
-						<div class="card">
-							<h3>CPU Usage</h3>
-							<div class="value"><span id="cpu">--</span> <span class="unit">%</span></div>
+			<body oncontextmenu="return false;" onmousedown="handleDrag(event)">
+				
+				<!-- 1. Window Mode UI -->
+				<div id="window-ui">
+					<div class="overlay"></div>
+					<div class="container">
+						<div class="header">
+							<h1 id="panel-title">System Monitor</h1>
+							<p id="panel-subtitle">Live Hardware Performance Dashboard</p>
 						</div>
-						<div class="card">
-							<h3>RAM Usage</h3>
-							<div class="value"><span id="ram">--</span> <span class="unit">%</span></div>
-						</div>
-						<div class="card">
-							<h3>GPU Usage</h3>
-							<div class="value"><span id="gpu">--</span> <span class="unit">%</span></div>
-						</div>
-						<div class="card">
-							<h3>GPU Temp</h3>
-							<div class="value"><span id="gputemp">--</span> <span class="unit">&#176;C</span></div>
+						<div class="grid-container" id="cards-grid">
+							<div class="card"><h3>CPU</h3><div class="value"><span id="cpu">--</span> <span class="unit">%</span></div></div>
+							<div class="card"><h3>RAM</h3><div class="value"><span id="ram">--</span> <span class="unit">%</span></div></div>
+							<div class="card"><h3>GPU</h3><div class="value"><span id="gpu">--</span> <span class="unit">%</span></div></div>
+							<div class="card"><h3>TEMP</h3><div class="value"><span id="gputemp">--</span> <span class="unit">&#176;C</span></div></div>
 						</div>
 					</div>
+					<div class="controls-bar">
+						<button class="switch-btn" id="btn-toggle" onclick="toggleView()">&#x21BB; Specs</button>
+						<button class="switch-btn" onclick="setMode('overlay')">&#128159; Overlay</button>
+						<button class="switch-btn" onclick="playVoice()">&#128266; Voice</button>
+					</div>
+					<a href="https://github.com/xiaokuai0915/System-Monitor-App" target="_blank" class="version-tag">v1.2.0</a>
 				</div>
 
-				<div class="controls-bar">
-					<button class="switch-btn" id="btn-toggle" onclick="toggleView()">
-						&#x21BB; Show System Hardware Specs
-					</button>
-					<button class="switch-btn" onclick="playVoice()">
-						&#128266; Voice
-					</button>
+				<!-- 2. Overlay Mode UI -->
+				<div id="overlay-ui">
+					<button class="restore-btn" onclick="setMode('window')">&#128450; Restore</button>
+					<div class="osd-grid">
+						<div class="osd-item"><span class="osd-lbl">CPU</span><span class="osd-val" id="ov-cpu">--</span>%</div>
+						<div class="osd-item"><span class="osd-lbl">RAM</span><span class="osd-val" id="ov-ram">--</span>%</div>
+						<div class="osd-item"><span class="osd-lbl">GPU</span><span class="osd-val" id="ov-gpu">--</span>%</div>
+						<div class="osd-item"><span class="osd-lbl">TEMP</span><span class="osd-val" id="ov-gputemp">--</span>&#176;C</div>
+					</div>
 				</div>
-
-				<a href="https://github.com/xiaokuai0915/System-Monitor-App" target="_blank" class="version-tag">
-					v1.1.1
-				</a>
 
 				<script>
 					let isSpecsView = false;
 					let cachedSpecs = null;
+					let currentMode = 'window';
 
-					function playVoice() {
-						fetch('/api/play_voice').catch(err => console.error(err));
+					function handleDrag(e) {
+						if (currentMode === 'overlay' && e.button === 0 && e.target.tagName !== 'BUTTON') {
+							if (window.nativeDrag) {
+								window.nativeDrag();
+							}
+						}
+					}
+
+					function playVoice() { fetch('/api/play_voice').catch(err => console.error(err)); }
+
+					function setMode(mode) {
+						fetch('/api/set_mode?m=' + mode).then(() => {
+							currentMode = mode;
+							applyModeStyles(mode);
+						});
+					}
+
+					function applyModeStyles(mode) {
+						document.body.classList.remove('overlay-mode');
+						if (mode === 'overlay') document.body.classList.add('overlay-mode');
 					}
 
 					function toggleView() {
+						if (currentMode !== 'window') return;
 						isSpecsView = !isSpecsView;
 						const body = document.body;
 						const grid = document.getElementById('cards-grid');
@@ -563,41 +628,19 @@ void StartServer() {
 							body.classList.add('specs-mode');
 							title.innerText = "System Specs";
 							subtitle.innerText = "Hardware Configuration Details";
-							btn.innerHTML = "&#x21BB; Show Live Performance";
-
-							if (cachedSpecs) {
-								renderSpecsCards(cachedSpecs);
-							} else {
-								fetch('/api/specs')
-									.then(res => res.json())
-									.then(data => {
-										cachedSpecs = data;
-										renderSpecsCards(data);
-									});
-							}
+							btn.innerHTML = "&#x21BB; Performance";
+							if (cachedSpecs) renderSpecsCards(cachedSpecs);
+							else fetch('/api/specs').then(res => res.json()).then(data => { cachedSpecs = data; renderSpecsCards(data); });
 						} else {
 							body.classList.remove('specs-mode');
 							title.innerText = "System Monitor";
 							subtitle.innerText = "Live Hardware Performance Dashboard";
-							btn.innerHTML = "&#x21BB; Show System Hardware Specs";
-
+							btn.innerHTML = "&#x21BB; Specs";
 							grid.innerHTML = `
-								<div class="card">
-									<h3>CPU Usage</h3>
-									<div class="value"><span id="cpu">--</span> <span class="unit">%</span></div>
-								</div>
-								<div class="card">
-									<h3>RAM Usage</h3>
-									<div class="value"><span id="ram">--</span> <span class="unit">%</span></div>
-								</div>
-								<div class="card">
-									<h3>GPU Usage</h3>
-									<div class="value"><span id="gpu">--</span> <span class="unit">%</span></div>
-								</div>
-								<div class="card">
-									<h3>GPU Temp</h3>
-									<div class="value"><span id="gputemp">--</span> <span class="unit">&#176;C</span></div>
-								</div>
+								<div class="card"><h3>CPU</h3><div class="value"><span id="cpu">--</span> <span class="unit">%</span></div></div>
+								<div class="card"><h3>RAM</h3><div class="value"><span id="ram">--</span> <span class="unit">%</span></div></div>
+								<div class="card"><h3>GPU</h3><div class="value"><span id="gpu">--</span> <span class="unit">%</span></div></div>
+								<div class="card"><h3>TEMP</h3><div class="value"><span id="gputemp">--</span> <span class="unit">&#176;C</span></div></div>
 							`;
 							updateStats();
 						}
@@ -605,51 +648,45 @@ void StartServer() {
 
 					function renderSpecsCards(data) {
 						const grid = document.getElementById('cards-grid');
-						
-						let html = `
-							<div class="card full-width">
-								<h3>Processor (CPU)</h3>
-								<div class="value" style="font-size: 1.25rem;">${data.cpuName}</div>
-							</div>
-						`;
-
+						let html = `<div class="card full-width"><h3>Processor (CPU)</h3><div class="value" style="font-size: 1.25rem;">${data.cpuName}</div></div>`;
 						if (data.gpuNames && data.gpuNames.length > 0) {
 							data.gpuNames.forEach((gpu, index) => {
 								let title = data.gpuNames.length > 1 ? `Graphics Card (GPU ${index + 1})` : `Graphics Card (GPU)`;
-								html += `
-									<div class="card full-width">
-										<h3>${title}</h3>
-										<div class="value" style="font-size: 1.25rem;">${gpu}</div>
-									</div>
-								`;
+								html += `<div class="card full-width"><h3>${title}</h3><div class="value" style="font-size: 1.25rem;">${gpu}</div></div>`;
 							});
 						}
-
-						html += `
-							<div class="card full-width">
-								<h3>Total Memory</h3>
-								<div class="value">${data.totalRam}</div>
-							</div>
-						`;
-
+						html += `<div class="card full-width"><h3>Total Memory</h3><div class="value">${data.totalRam}</div></div>`;
 						grid.innerHTML = html;
 					}
 
 					function updateStats() {
-						if (isSpecsView) return;
-
 						fetch('/api/stats')
 							.then(res => res.json())
 							.then(data => {
-								if (document.getElementById('cpu')) document.getElementById('cpu').innerText = data.cpuUsage.toFixed(1);
-								if (document.getElementById('ram')) document.getElementById('ram').innerText = data.ramUsage.toFixed(1);
-								if (document.getElementById('gpu')) document.getElementById('gpu').innerText = data.gpuUsage.toFixed(1);
-								if (document.getElementById('gputemp')) document.getElementById('gputemp').innerText = data.gpuTemp.toFixed(1);
+								const cpu = data.cpuUsage.toFixed(1);
+								const ram = data.ramUsage.toFixed(1);
+								const gpu = data.gpuUsage.toFixed(1);
+								const temp = data.gpuTemp.toFixed(1);
+
+								if (!isSpecsView) {
+									if (document.getElementById('cpu')) document.getElementById('cpu').innerText = cpu;
+									if (document.getElementById('ram')) document.getElementById('ram').innerText = ram;
+									if (document.getElementById('gpu')) document.getElementById('gpu').innerText = gpu;
+									if (document.getElementById('gputemp')) document.getElementById('gputemp').innerText = temp;
+								}
+
+								document.getElementById('ov-cpu').innerText = cpu;
+								document.getElementById('ov-ram').innerText = ram;
+								document.getElementById('ov-gpu').innerText = gpu;
+								document.getElementById('ov-gputemp').innerText = temp;
+
+								if (data.mode === 0 && currentMode !== 'window') { currentMode = 'window'; applyModeStyles('window'); }
+								else if (data.mode === 1 && currentMode !== 'overlay') { currentMode = 'overlay'; applyModeStyles('overlay'); }
 							})
 							.catch(err => console.error('Fetch Error:', err));
 					}
 
-					setInterval(updateStats, 1000);
+					setInterval(updateStats, 500);
 					updateStats();
 				</script>
 			</body>
@@ -667,16 +704,26 @@ int main() {
 	serverThread.detach(); // detach the server thread so it runs independently
 
 	Sleep(500);
-
 	PlayRandomVoiceLine(); // play random voiceline during startup
 
 	webview::webview w(false, nullptr); // create a webview window (not resizable, no parent window)
 	w.set_title("System Hardware Monitor");
 	w.set_size(1600, 900, WEBVIEW_HINT_NONE);
+
+	w.bind("nativeDrag", [](const std::string& req) -> std::string {
+		if (g_hwndWebview) {
+			ReleaseCapture();
+			SendMessageA(g_hwndWebview, WM_SYSCOMMAND, 0xF012, 0);
+		}
+		return "";
+		});
+
 	w.navigate("http://127.0.0.1:18080");
 
-	HWND hwnd = FindWindowA(nullptr, "System Hardware Monitor"); // find the window handle of the webview window by its title
-	if (hwnd) {
+	g_hwndWebview = FindWindowA(nullptr, "System Hardware Monitor"); // find the window handle of the webview window by its title
+	if (g_hwndWebview) {
+		g_oldWndProc = (WNDPROC)SetWindowLongPtrA(g_hwndWebview, GWLP_WNDPROC, (LONG_PTR)SubclassWndProc);
+
 		HICON hIcon = (HICON)LoadImageA(
 			GetModuleHandle(NULL), // load the icon from the resources
 			MAKEINTRESOURCEA(IDI_APP_ICON), // the resource ID of the icon
@@ -686,12 +733,11 @@ int main() {
 			LR_DEFAULTCOLOR // use the default color format for the icon
 		);
 		if (hIcon) {
-			SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon); // set the big icon for the window
-			SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon); // set the small icon for the window
+			SendMessage(g_hwndWebview, WM_SETICON, ICON_BIG, (LPARAM)hIcon); // set the big icon for the window
+			SendMessage(g_hwndWebview, WM_SETICON, ICON_SMALL, (LPARAM)hIcon); // set the small icon for the window
 		}
 	}
 
 	w.run();
-
 	return 0;
 }
