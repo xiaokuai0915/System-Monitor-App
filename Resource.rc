@@ -35,7 +35,5 @@ END
 
 IDI_APP_ICON            ICON                    "assets/app.ico"
 IDR_VOICE               WAVE                    "assets/voice.wav"
-IDR_VOICE2              WAVE                    "assets/voice2.wav"
-IDR_VOICE3              WAVE                    "assets/voice3.wav"
 IDR_MASCOT1_IMG         RCDATA                  "assets/mascot.jpg"
 IDR_MASCOT2_IMG         RCDATA                  "assets/mascot2.jpg"

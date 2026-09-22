@@ -1,19 +1,17 @@
-#define _CRT_SECURE_NO_WARNINGS //ignore deprecated warnings for functions like sprintf, strcpy, etc.
-#pragma comment(linker, "/subsystem:windows /ENTRY:mainCRTStartup") // tell the compiler this is a windows application and not a console application, but still use main() as the entry point
+#define _CRT_SECURE_NO_WARNINGS 
+#pragma comment(linker, "/subsystem:windows /ENTRY:mainCRTStartup") 
+#pragma comment(lib, "winmm.lib") 
 
-// both window libaries that used for capture pc details
 #include <winsock2.h>
 #include <windows.h>
-#include <mmsystem.h> // for PlaySound
-#pragma comment(lib, "winmm.lib") // auto link winmm.lib for PlaySound
+#include <mmsystem.h> 
 
-#include "resource.h" // load resources like images and sounds
-#include <thread> // for running the web server in a separate thread
+#include "resource.h" 
+#include <thread>
 #include <atomic>
-#include <sysinfoapi.h> // for getting RAM usage
-#include <processthreadsapi.h> // for getting CPU usage
+#include <sysinfoapi.h>
+#include <processthreadsapi.h>
 
-#include <random>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -25,12 +23,10 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 
-// tell crow to use standalone ASIO (no Boost dependency)
 #define ASIO_STANDALONE
 #define CROW_MAIN
 #include "crow.h"
 
-// tell webview to use WinAPI backend
 #define WEBVIEW_WINAPI
 #include "webview.h"
 
@@ -40,19 +36,54 @@ enum AppMode {
 };
 
 std::atomic<AppMode> g_currentMode{ MODE_WINDOW };
+std::atomic<bool> g_isMuted{ false };
+std::atomic<int> g_bgmVolume{ 100 };
 HWND g_hwndWebview = NULL;
 WNDPROC g_oldWndProc = NULL;
 
+std::string GetResourceData(int resourceId, const char* resourceType) {
+	HMODULE hModule = GetModuleHandle(NULL);
+	HRSRC hRes = FindResourceA(hModule, MAKEINTRESOURCEA(resourceId), resourceType);
+	if (!hRes) return "";
+	HGLOBAL hData = LoadResource(hModule, hRes);
+	DWORD size = SizeofResource(hModule, hRes);
+	char* data = (char*)LockResource(hData);
+	if (!data || size == 0) return "";
+	return std::string(data, size);
+}
+
+void SetBGMVolume(int volPercent) {
+	if (volPercent < 0) volPercent = 0;
+	if (volPercent > 100) volPercent = 100;
+	g_bgmVolume = volPercent;
+
+	int actualVol = volPercent;
+	if (g_isMuted.load()) {
+		actualVol = 0;
+	}
+
+	DWORD waveVol = (DWORD)((actualVol / 100.0f) * 0xFFFF);
+	DWORD fullVol = (waveVol & 0xFFFF) | ((waveVol & 0xFFFF) << 16);
+	waveOutSetVolume(NULL, fullVol);
+}
+
+void PlayBGM() {
+	PlaySoundA(MAKEINTRESOURCEA(IDR_VOICE), GetModuleHandle(NULL), SND_RESOURCE | SND_ASYNC | SND_LOOP);
+	SetBGMVolume(g_bgmVolume.load());
+}
+
+void StopBGM() {
+	SetBGMVolume(g_bgmVolume.load());
+}
+
+void ResumeBGM() {
+	SetBGMVolume(g_bgmVolume.load());
+}
+
 LRESULT CALLBACK SubclassWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 	if (g_currentMode == MODE_OVERLAY) {
-		if (uMsg == WM_SHOWWINDOW && wParam == FALSE) {
-			return 0;
-		}
-
-		if (uMsg == WM_SYSCOMMAND && (wParam & 0xFFF0) == SC_MINIMIZE) {
-			return 0;
-		}
-
+		if (uMsg == WM_SHOWWINDOW && wParam == FALSE) return 0;
+		if (uMsg == WM_SYSCOMMAND && (wParam & 0xFFF0) == SC_MINIMIZE) return 0;
 		if (uMsg == WM_WINDOWPOSCHANGING) {
 			WINDOWPOS* pos = (WINDOWPOS*)lParam;
 			if (pos->flags & SWP_HIDEWINDOW) {
@@ -82,66 +113,27 @@ void SetAppMode(AppMode mode) {
 		SetWindowPos(g_hwndWebview, HWND_NOTOPMOST, x, y, w, h, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
 	}
 	else if (mode == MODE_OVERLAY) {
-		int width = 210;
-		int height = 75;
-		int x = 20;
-		int y = 20;
-
+		int width = 210, height = 75, x = 20, y = 20;
 		SetWindowLong(g_hwndWebview, GWL_STYLE, WS_POPUP | WS_VISIBLE);
 		SetWindowLong(g_hwndWebview, GWL_EXSTYLE, WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE);
 		SetWindowPos(g_hwndWebview, HWND_TOPMOST, x, y, width, height, SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW);
 	}
 }
 
-// read resouce data from the .exe ram that was compiled with the resources
-std::string GetResourceData(int resourceId, const char* resourceType) {
-	HMODULE hModule = GetModuleHandle(NULL); // get the handle to the current module (the .exe file)
-	HRSRC hRes = FindResourceA(hModule, MAKEINTRESOURCEA(resourceId), resourceType);
-	if (!hRes) return ""; // if the resource is not found, return an empty string
-	HGLOBAL hData = LoadResource(hModule, hRes); // load the resource into memory
-	DWORD size = SizeofResource(hModule, hRes); // get the size of the resource
-	char* data = (char*)LockResource(hData); // lock the resource in memory and get a pointer to it
-	if (!data || size == 0) return ""; // if the resource is empty, return an empty string
-	return std::string(data, size);
-}
+void* __stdcall ADL_Main_Memory_Alloc(int iSize) { return malloc(iSize); }
 
-void* __stdcall ADL_Main_Memory_Alloc(int iSize) {
-	return malloc(iSize);
-}
-
-struct ADLTemperature {
-	int iSize;
-	int iTemperature;
-};
-
+struct ADLTemperature { int iSize; int iTemperature; };
 struct ADLPMActivity {
-	int iSize;
-	int iEngineClock;
-	int iMemoryClock;
-	int iVddc;
-	int iActivityPercent;
-	int iCurrentPerformanceLevel;
-	int iCurrentBusSpeed;
-	int iCurrentBusLanes;
-	int iMaximumBusLanes;
-	int iReserved;
+	int iSize, iEngineClock, iMemoryClock, iVddc, iActivityPercent;
+	int iCurrentPerformanceLevel, iCurrentBusSpeed, iCurrentBusLanes, iMaximumBusLanes, iReserved;
 };
-
 struct AdapterInfo {
-	int iSize;
-	int iAdapterIndex;
+	int iSize, iAdapterIndex;
 	char strUDID[256];
-	int iBusNumber;
-	int iDeviceNumber;
-	int iFunctionNumber;
-	int iVendorID;
-	char strAdapterName[256];
-	char strDisplayName[256];
-	int iPresent;
-	int iExist;
-	char strDriverPath[256];
-	char strDriverPathExt[256];
-	char strPNPString[256];
+	int iBusNumber, iDeviceNumber, iFunctionNumber, iVendorID;
+	char strAdapterName[256], strDisplayName[256];
+	int iPresent, iExist;
+	char strDriverPath[256], strDriverPathExt[256], strPNPString[256];
 	int iOSDisplayIndex;
 };
 
@@ -173,20 +165,16 @@ bool GetAmdGpuStats(double& usageOut, double& tempOut) {
 			adapterInfos[0].iSize = sizeof(AdapterInfo);
 			if (ADL_Adapter_AdapterInfo_Get && ADL_Adapter_AdapterInfo_Get(adapterInfos.data(), sizeof(AdapterInfo) * numAdapters) == 0) {
 				for (int i = 0; i < numAdapters; i++) {
-					// 1002 is AMD Vendor ID
 					if (adapterInfos[i].iExist && adapterInfos[i].iVendorID == 1002) {
 						int adapterIndex = adapterInfos[i].iAdapterIndex;
-
 						ADLTemperature adlTemp = { sizeof(ADLTemperature), 0 };
 						if (ADL_Overdrive5_Temperature_Get && ADL_Overdrive5_Temperature_Get(adapterIndex, 0, &adlTemp) == 0) {
 							tempOut = (double)adlTemp.iTemperature / 1000.0;
 						}
-
 						ADLPMActivity adlActivity = { sizeof(ADLPMActivity), 0 };
 						if (ADL_Overdrive5_CurrentActivity_Get && ADL_Overdrive5_CurrentActivity_Get(adapterIndex, &adlActivity) == 0) {
 							usageOut = (double)adlActivity.iActivityPercent;
 						}
-
 						success = true;
 						break;
 					}
@@ -195,37 +183,26 @@ bool GetAmdGpuStats(double& usageOut, double& tempOut) {
 		}
 		if (ADL_Main_Control_Destroy) ADL_Main_Control_Destroy();
 	}
-
 	FreeLibrary(hAdl);
 	return success;
 }
 
-struct nvmlUtilization_t { // structure to hold GPU utilization rates
-	unsigned int gpu;
-	unsigned int memory;
-};
-
-// NVML temperature sensor types
-typedef int (*nvmlInit_t)(); // function pointer type for nvmlInit
-typedef int (*nvmlShutdown_t)(); // function pointer type for nvmlShutdown
-typedef int (*nvmlDeviceGetHandleByIndex_t)(unsigned int index, void** device); // function pointer type for nvmlDeviceGetHandleByIndex
-typedef int (*nvmlDeviceGetTemperature_t)(void* device, int sensorType, unsigned int* temp); // function pointer type for nvmlDeviceGetTemperature
-typedef int (*nvmlDeviceGetUtilizationRates_t)(void* device, nvmlUtilization_t* rates); // function pointer type for nvmlDeviceGetUtilizationRates
+struct nvmlUtilization_t { unsigned int gpu; unsigned int memory; };
+typedef int (*nvmlInit_t)();
+typedef int (*nvmlShutdown_t)();
+typedef int (*nvmlDeviceGetHandleByIndex_t)(unsigned int index, void** device);
+typedef int (*nvmlDeviceGetTemperature_t)(void* device, int sensorType, unsigned int* temp);
+typedef int (*nvmlDeviceGetUtilizationRates_t)(void* device, nvmlUtilization_t* rates);
 
 void GetGpuStats(double& usageOut, double& tempOut) {
-	usageOut = 0.0;
-	tempOut = 0.0;
-
-	// try NVIDA NVML first
+	usageOut = 0.0; tempOut = 0.0;
 	HMODULE hNvml = LoadLibraryA("nvml.dll");
 	if (hNvml) {
 		auto nvmlInit = (nvmlInit_t)GetProcAddress(hNvml, "nvmlInit_v2");
 		if (!nvmlInit) nvmlInit = (nvmlInit_t)GetProcAddress(hNvml, "nvmlInit");
-
 		auto nvmlShutdown = (nvmlShutdown_t)GetProcAddress(hNvml, "nvmlShutdown");
 		auto nvmlGetHandle = (nvmlDeviceGetHandleByIndex_t)GetProcAddress(hNvml, "nvmlDeviceGetHandleByIndex_v2");
 		if (!nvmlGetHandle) nvmlGetHandle = (nvmlDeviceGetHandleByIndex_t)GetProcAddress(hNvml, "nvmlDeviceGetHandleByIndex");
-
 		auto nvmlGetTemp = (nvmlDeviceGetTemperature_t)GetProcAddress(hNvml, "nvmlDeviceGetTemperature");
 		auto nvmlGetUtil = (nvmlDeviceGetUtilizationRates_t)GetProcAddress(hNvml, "nvmlDeviceGetUtilizationRates");
 
@@ -233,199 +210,155 @@ void GetGpuStats(double& usageOut, double& tempOut) {
 			void* device = nullptr;
 			if (nvmlGetHandle && nvmlGetHandle(0, &device) == 0 && device) {
 				unsigned int temp = 0;
-				if (nvmlGetTemp && nvmlGetTemp(device, 0, &temp) == 0) {
-					tempOut = (double)temp;
-				}
-
+				if (nvmlGetTemp && nvmlGetTemp(device, 0, &temp) == 0) tempOut = (double)temp;
 				nvmlUtilization_t util = { 0 };
-				if (nvmlGetUtil && nvmlGetUtil(device, &util) == 0) {
-					usageOut = (double)util.gpu;
-				}
-
+				if (nvmlGetUtil && nvmlGetUtil(device, &util) == 0) usageOut = (double)util.gpu;
 				if (nvmlShutdown) nvmlShutdown();
 				FreeLibrary(hNvml);
-				return; // capture NVIDIA card sucess
+				return;
 			}
 			if (nvmlShutdown) nvmlShutdown();
 		}
 		FreeLibrary(hNvml);
 	}
-
-	// if cannot dected nvidia/NVML capture failed then try AMD DL
 	GetAmdGpuStats(usageOut, tempOut);
 }
 
-std::string GetRealCpuName() { // function to get the real CPU name from the Windows registry
-	HKEY hKey; // handle to the registry key
-	char cpuName[256] = "Unknown CPU"; // buffer to hold the CPU name
-	DWORD bufSize = sizeof(cpuName); // size of the buffer
-	// Open the registry key for the CPU name
-	if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", 0, KEY_READ, &hKey) == ERROR_SUCCESS) { // if the key is opened successfully
-		RegQueryValueExA(hKey, "ProcessorNameString", NULL, NULL, (LPBYTE)cpuName, &bufSize); // query the value of the CPU name
+std::string GetRealCpuName() {
+	HKEY hKey; char cpuName[256] = "Unknown CPU"; DWORD bufSize = sizeof(cpuName);
+	if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+		RegQueryValueExA(hKey, "ProcessorNameString", NULL, NULL, (LPBYTE)cpuName, &bufSize);
 		RegCloseKey(hKey);
 	}
 	return std::string(cpuName);
 }
 
-std::string GetRealTotalRam() { // function to get the total RAM size in GB
-	MEMORYSTATUSEX memInfo; // structure to hold memory status information
-	memInfo.dwLength = sizeof(MEMORYSTATUSEX); // set the size of the structure
-	GlobalMemoryStatusEx(&memInfo); // get the memory status information
-	double totalGB = (double)memInfo.ullTotalPhys / (1024.0 * 1024.0 * 1024.0); // convert total physical memory from bytes to gigabytes
-	char buf[32]; // buffer to hold the formatted string
-	snprintf(buf, sizeof(buf), "%.1f GB", totalGB); // format the total RAM size to one decimal place and store it in the buffer
+std::string GetRealTotalRam() {
+	MEMORYSTATUSEX memInfo; memInfo.dwLength = sizeof(MEMORYSTATUSEX); GlobalMemoryStatusEx(&memInfo);
+	double totalGB = (double)memInfo.ullTotalPhys / (1024.0 * 1024.0 * 1024.0);
+	char buf[32]; snprintf(buf, sizeof(buf), "%.1f GB", totalGB);
 	return std::string(buf);
 }
 
-std::vector<std::string> GetRealGpuName() { // function to get the real GPU name using EnumDisplayDevices
+std::vector<std::string> GetRealGpuName() {
 	std::vector<std::string> gpuList;
-	DISPLAY_DEVICEA dd;
-	ZeroMemory(&dd, sizeof(dd));
-	dd.cb = sizeof(dd);
-
+	DISPLAY_DEVICEA dd; ZeroMemory(&dd, sizeof(dd)); dd.cb = sizeof(dd);
 	for (DWORD i = 0; EnumDisplayDevicesA(NULL, i, &dd, 0); i++) {
 		if (dd.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) continue;
-
 		std::string gpuName = dd.DeviceString;
-
 		if (!gpuName.empty() && std::find(gpuList.begin(), gpuList.end(), gpuName) == gpuList.end()) {
 			gpuList.push_back(gpuName);
 		}
 	}
-
-	if (gpuList.empty()) {
-		gpuList.push_back("Unknown GPU");
-	}
+	if (gpuList.empty()) gpuList.push_back("Unknown GPU");
 	return gpuList;
 }
 
 double GetRamUsage() {
-	MEMORYSTATUSEX memInfo;
-	memInfo.dwLength = sizeof(MEMORYSTATUSEX); // set the size of the structure
-	GlobalMemoryStatusEx(&memInfo); // get the memory status information
-	DWORDLONG totalPhysMem = memInfo.ullTotalPhys; // total physical memory in bytes
-	DWORDLONG physMemUsed = memInfo.ullTotalPhys - memInfo.ullAvailPhys; // used physical memory in bytes
-	return ((double)physMemUsed / (double)totalPhysMem * 100.0); // calculate the RAM usage percentage
+	MEMORYSTATUSEX memInfo; memInfo.dwLength = sizeof(MEMORYSTATUSEX); GlobalMemoryStatusEx(&memInfo);
+	return ((double)(memInfo.ullTotalPhys - memInfo.ullAvailPhys) / (double)memInfo.ullTotalPhys * 100.0);
 }
 
 class CpuUsage {
 private:
-	ULARGE_INTEGER lastIdleTime, lastKernelTime, lastUserTime; // store the last recorded CPU times
-	void filetime_to_ularge(const FILETIME& ft, ULARGE_INTEGER& ul) { // convert FILETIME to ULARGE_INTEGER
-		ul.LowPart = ft.dwLowDateTime; // set the low part of the ULARGE_INTEGER
-		ul.HighPart = ft.dwHighDateTime; // set the high part of the ULARGE_INTEGER
+	ULARGE_INTEGER lastIdleTime, lastKernelTime, lastUserTime;
+	void filetime_to_ularge(const FILETIME& ft, ULARGE_INTEGER& ul) {
+		ul.LowPart = ft.dwLowDateTime; ul.HighPart = ft.dwHighDateTime;
 	}
 public:
 	CpuUsage() {
-		FILETIME idleTime, kernelTime, userTime; // get the initial CPU times
-		GetSystemTimes(&idleTime, &kernelTime, &userTime); // get the system times for idle, kernel, and user
-		filetime_to_ularge(idleTime, lastIdleTime); // convert and store the last idle time
-		filetime_to_ularge(kernelTime, lastKernelTime); // convert and store the last kernel time
-		filetime_to_ularge(userTime, lastUserTime); // convert and store the last user time
+		FILETIME idleTime, kernelTime, userTime;
+		GetSystemTimes(&idleTime, &kernelTime, &userTime);
+		filetime_to_ularge(idleTime, lastIdleTime);
+		filetime_to_ularge(kernelTime, lastKernelTime);
+		filetime_to_ularge(userTime, lastUserTime);
 	}
 	double GetCpuUsage() {
 		FILETIME idleTime, kernelTime, userTime;
 		GetSystemTimes(&idleTime, &kernelTime, &userTime);
-
-		ULARGE_INTEGER idle, kernel, user; // convert the FILETIME values to ULARGE_INTEGER for calculations
-		filetime_to_ularge(idleTime, idle);
-		filetime_to_ularge(kernelTime, kernel);
-		filetime_to_ularge(userTime, user);
-
-		ULONGLONG sysIdleDiff = idle.QuadPart - lastIdleTime.QuadPart; // calculate the difference in idle time since the last measurement
-		ULONGLONG sysKernelDiff = kernel.QuadPart - lastKernelTime.QuadPart; // calculate the difference in kernel time since the last measurement
-		ULONGLONG sysUserDiff = user.QuadPart - lastUserTime.QuadPart; // calculate the difference in user time since the last measurement
-
-		lastIdleTime = idle;
-		lastKernelTime = kernel;
-		lastUserTime = user;
-
-		ULONGLONG totalSys = sysKernelDiff + sysUserDiff; // calculate the total system time since the last measurement
+		ULARGE_INTEGER idle, kernel, user;
+		filetime_to_ularge(idleTime, idle); filetime_to_ularge(kernelTime, kernel); filetime_to_ularge(userTime, user);
+		ULONGLONG sysIdleDiff = idle.QuadPart - lastIdleTime.QuadPart;
+		ULONGLONG sysKernelDiff = kernel.QuadPart - lastKernelTime.QuadPart;
+		ULONGLONG sysUserDiff = user.QuadPart - lastUserTime.QuadPart;
+		lastIdleTime = idle; lastKernelTime = kernel; lastUserTime = user;
+		ULONGLONG totalSys = sysKernelDiff + sysUserDiff;
 		if (totalSys == 0) return 0.0;
-
-		double cpuUsage = (1.0 - ((double)sysIdleDiff / (double)totalSys)) * 100.0; // calculate the CPU usage percentage
-		return cpuUsage < 0.0 ? 0.0 : (cpuUsage > 100.0 ? 100.0 : cpuUsage); // clamp the CPU usage percentage between 0 and 100
+		double cpuUsage = (1.0 - ((double)sysIdleDiff / (double)totalSys)) * 100.0;
+		return cpuUsage < 0.0 ? 0.0 : (cpuUsage > 100.0 ? 100.0 : cpuUsage);
 	}
 };
 
-CpuUsage cpuUsage; // create a global instance of the CpuUsage class to track CPU usage over time
-
-void PlayRandomVoiceLine() {
-	static const int voiceIds[] = { IDR_VOICE, IDR_VOICE2, IDR_VOICE3 }; // array of resource IDs for the voice lines
-
-	static std::random_device rd; // obtain a random number from hardware
-	static std::mt19937 gen(rd()); // seed the generator
-	std::uniform_int_distribution<> dis(0, 2); // random generate 0 to 2
-
-	int selectedVoice = voiceIds[dis(gen)];
-
-	PlaySoundA(
-		MAKEINTRESOURCEA(selectedVoice),
-		GetModuleHandle(NULL),
-		SND_RESOURCE | SND_ASYNC | SND_NOSTOP
-	);
-}
+CpuUsage cpuUsage;
 
 void StartServer() {
-	crow::SimpleApp app; // create a simple Crow application
+	crow::SimpleApp app;
 
-	CROW_ROUTE(app, "/assets/mascot.jpg") // route to serve the mascot image
-		([]() {
-		std::string imgData = GetResourceData(IDR_MASCOT1_IMG, MAKEINTRESOURCEA(10)); // RT_RCDATA = 10
-		crow::response res(imgData); // create a response with the image data
-		res.set_header("Content-Type", "image/jpeg"); // set the content type header to image/jpeg
-		return res;
-			});
+	PlayBGM();
 
-	CROW_ROUTE(app, "/assets/mascot2.jpg")
-		([]() {
-		std::string imgData = GetResourceData(IDR_MASCOT2_IMG, MAKEINTRESOURCEA(10)); // RT_RCDATA = 10
-		crow::response res(imgData);
-		res.set_header("Content-Type", "image/jpeg");
-		return res;
-			});
+	CROW_ROUTE(app, "/assets/mascot.jpg")([]() {
+		std::string imgData = GetResourceData(IDR_MASCOT1_IMG, MAKEINTRESOURCEA(10));
+		crow::response res(imgData); res.set_header("Content-Type", "image/jpeg"); return res;
+		});
 
-	CROW_ROUTE(app, "/api/stats") // route to serve the system stats as JSON
-		([]() {
-		double gpuUsage = 0.0, gpuTemp = 0.0;
-		GetGpuStats(gpuUsage, gpuTemp);
-		crow::json::wvalue res; // create a JSON response object
+	CROW_ROUTE(app, "/assets/mascot2.jpg")([]() {
+		std::string imgData = GetResourceData(IDR_MASCOT2_IMG, MAKEINTRESOURCEA(10));
+		crow::response res(imgData); res.set_header("Content-Type", "image/jpeg"); return res;
+		});
+
+	CROW_ROUTE(app, "/api/stats")([]() {
+		double gpuUsage = 0.0, gpuTemp = 0.0; GetGpuStats(gpuUsage, gpuTemp);
+		crow::json::wvalue res;
 		res["ramUsage"] = GetRamUsage();
 		res["cpuUsage"] = cpuUsage.GetCpuUsage();
 		res["gpuUsage"] = gpuUsage;
 		res["gpuTemp"] = gpuTemp;
 		res["mode"] = (int)g_currentMode.load();
-		return res; // return the JSON response
-			});
+		res["isMuted"] = g_isMuted.load();
+		res["volume"] = g_bgmVolume.load();
+		return res;
+		});
 
-	CROW_ROUTE(app, "/api/specs") // route to serve the system specs as JSON
-		([]() {
+	CROW_ROUTE(app, "/api/specs")([]() {
 		crow::json::wvalue res;
 		res["cpuName"] = GetRealCpuName();
 		res["totalRam"] = GetRealTotalRam();
 		res["gpuNames"] = GetRealGpuName();
 		return res;
-			});
+		});
 
-	CROW_ROUTE(app, "/api/play_voice")
-		([]() {
-		PlayRandomVoiceLine();
-		return crow::response(200);
-			});
-
-	CROW_ROUTE(app, "/api/set_mode")
-		([](const crow::request& req) {
+	CROW_ROUTE(app, "/api/set_mode")([](const crow::request& req) {
 		if (req.url_params.get("m")) {
 			std::string m = req.url_params.get("m");
 			if (m == "window") SetAppMode(MODE_WINDOW);
 			else if (m == "overlay") SetAppMode(MODE_OVERLAY);
 		}
 		return crow::response(200);
-			});
+		});
 
-	CROW_ROUTE(app, "/") // route to serve the main HTML page
-		([]() {
-		// return the HTML page as a raw string
+	CROW_ROUTE(app, "/api/toggle_audio")([]() {
+		if (g_isMuted) {
+			g_isMuted = false;
+			ResumeBGM();
+		}
+		else {
+			g_isMuted = true;
+			StopBGM();
+		}
+		crow::json::wvalue res;
+		res["isMuted"] = g_isMuted.load();
+		return res;
+		});
+
+	CROW_ROUTE(app, "/api/set_volume")([](const crow::request& req) {
+		if (req.url_params.get("v")) {
+			int vol = std::stoi(req.url_params.get("v"));
+			SetBGMVolume(vol);
+		}
+		return crow::response(200);
+		});
+
+	CROW_ROUTE(app, "/")([]() {
 		auto page = crow::response(R"rawhtml(
 			<!DOCTYPE html>
 			<html lang="en">
@@ -435,126 +368,103 @@ void StartServer() {
 				<title>System Monitor</title>
 				<style>
 					* { box-sizing: border-box; margin: 0; padding: 0; }
-					
 					html, body {
-						width: 100vw;
-						height: 100vh;
-						overflow: hidden;
-						background-color: #0b0813;
-						font-family: 'Consolas', 'Segoe UI', sans-serif;
-						color: #f1f5f9;
-						user-select: none;
-						-webkit-user-select: none;
+						width: 100vw; height: 100vh; overflow: hidden;
+						background-color: #0d0b12; font-family: 'Consolas', 'Segoe UI', sans-serif;
+						color: #f1f5f9; user-select: none; -webkit-user-select: none;
 					}
-
-					/* --- 1. WINDOW MODE --- */
 					#window-ui {
-						width: 100%; height: 100%;
-						display: flex; align-items: center; padding-left: 60px;
+						width: 100%; height: 100%; display: flex; align-items: center; padding-left: 60px;
 						background: url('/assets/mascot.jpg') no-repeat center center / cover;
 						transition: background-image 0.5s ease; position: relative;
 					}
 					#window-ui .overlay {
 						position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-						background: linear-gradient(90deg, rgba(14, 10, 18, 0.9) 0%, rgba(14, 10, 18, 0.6) 45%, rgba(14, 10, 18, 0.1) 100%);
-						transition: background 0.5s ease;
-						z-index: 1;
+						background: linear-gradient(90deg, rgba(16, 12, 22, 0.92) 0%, rgba(16, 12, 22, 0.65) 45%, rgba(16, 12, 22, 0.1) 100%);
+						transition: background 0.5s ease; z-index: 1;
 					}
 					#window-ui .container { position: relative; z-index: 2; max-width: 500px; width: 100%; }
-					.header { margin-bottom: 28px; border-bottom: 2px solid rgba(255, 120, 50, 0.4); padding-bottom: 12px; }
-					.header h1 { font-size: 2.3rem; color: #ff9d66; font-weight: 700; }
-					.header p { font-size: 0.95rem; color: #cbd5e1; margin-top: 4px; }
-					
+					.header { margin-bottom: 28px; border-bottom: 2px solid rgba(224, 153, 94, 0.4); padding-bottom: 12px; }
+					.header h1 { font-size: 2.3rem; color: #f4b266; font-weight: 700; letter-spacing: 0.5px; }
+					.header p { font-size: 0.95rem; color: #d2c4bc; margin-top: 4px; }
 					.grid-container { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
 					.card {
-						background: rgba(22, 16, 28, 0.65);
-						border: 1px solid rgba(255, 120, 50, 0.25);
-						backdrop-filter: blur(16px);
-						border-radius: 16px;
-						padding: 22px 24px;
-						box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+						background: rgba(25, 18, 30, 0.68); border: 1px solid rgba(224, 153, 94, 0.3);
+						backdrop-filter: blur(16px); border-radius: 16px; padding: 22px 24px;
+						box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45); transition: all 0.3s ease;
 					}
 					.card.full-width { grid-column: span 2; }
-					.card h3 { font-size: 0.8rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 8px; }
-					.card .value { font-size: 1.8rem; font-weight: 700; color: #ffab76; }
-					.card .unit { font-size: 1rem; color: #cbd5e1; font-weight: 400; }
-
-					.controls-bar { position: fixed; bottom: 35px; left: 60px; z-index: 10; display: flex; gap: 12px; }
+					.card h3 { font-size: 0.8rem; color: #a4948a; text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 8px; }
+					.card .value { font-size: 1.8rem; font-weight: 700; color: #f0be81; }
+					.card .unit { font-size: 1rem; color: #d2c4bc; font-weight: 400; }
+					.controls-bar { position: fixed; bottom: 35px; left: 60px; z-index: 10; display: flex; align-items: center; gap: 12px; }
 					.switch-btn {
-						background: rgba(22, 16, 28, 0.8); border: 1px solid rgba(255, 120, 50, 0.4);
-						color: #ffab76; padding: 12px 22px; border-radius: 24px; cursor: pointer;
+						background: rgba(25, 18, 30, 0.85); border: 1px solid rgba(224, 153, 94, 0.4);
+						color: #f0be81; padding: 12px 22px; border-radius: 24px; cursor: pointer;
 						font-size: 0.88rem; font-weight: 600; backdrop-filter: blur(12px); transition: all 0.2s ease;
 					}
-					.switch-btn:hover { transform: translateY(-2px); background: rgba(255, 120, 50, 0.15); }
+					.switch-btn:hover { transform: translateY(-2px); background: rgba(224, 153, 94, 0.2); }
+					.volume-box {
+						display: flex; align-items: center; gap: 8px;
+						background: rgba(25, 18, 30, 0.85); border: 1px solid rgba(224, 153, 94, 0.4);
+						padding: 8px 16px; border-radius: 24px; backdrop-filter: blur(12px);
+					}
+					.volume-slider {
+						-webkit-appearance: none; width: 90px; height: 5px; border-radius: 5px;
+						background: rgba(224, 153, 94, 0.3); outline: none; transition: background 0.2s;
+					}
+					.volume-slider::-webkit-slider-thumb {
+						-webkit-appearance: none; appearance: none; width: 14px; height: 14px;
+						border-radius: 50%; background: #f0be81; cursor: pointer; transition: transform 0.1s;
+					}
+					.volume-slider::-webkit-slider-thumb:hover { transform: scale(1.2); }
+					.volume-label { font-size: 0.8rem; color: #f0be81; min-width: 38px; font-weight: 600; }
 					.version-tag {
 						position: fixed; bottom: 25px; right: 30px; z-index: 10; font-size: 0.85rem;
-						color: rgba(255, 255, 255, 0.45); text-decoration: none; padding: 6px 12px;
-						border-radius: 12px; background: rgba(0, 0, 0, 0.2); border: 1px solid rgba(255, 255, 255, 0.08);
+						color: rgba(240, 190, 129, 0.5); text-decoration: none; padding: 6px 12px;
+						border-radius: 12px; background: rgba(0, 0, 0, 0.25); border: 1px solid rgba(224, 153, 94, 0.15);
 					}
-
-					/* --- SPECS MODE STYLES (完整深蓝视觉匹配) --- */
 					body.specs-mode #window-ui { background-image: url('/assets/mascot2.jpg'); }
 					body.specs-mode #window-ui .overlay {
-						background: linear-gradient(90deg, rgba(12, 24, 42, 0.92) 0%, rgba(12, 24, 42, 0.65) 45%, rgba(12, 24, 42, 0.15) 100%);
+						background: linear-gradient(90deg, rgba(20, 26, 31, 0.93) 0%, rgba(20, 26, 31, 0.7) 45%, rgba(20, 26, 31, 0.15) 100%);
 					}
-					body.specs-mode #window-ui .header { border-bottom-color: rgba(56, 189, 248, 0.4); }
-					body.specs-mode #window-ui .header h1 { color: #38bdf8; }
-					body.specs-mode #window-ui .card { background: rgba(12, 28, 48, 0.65); border-color: rgba(56, 189, 248, 0.25); }
-					body.specs-mode #window-ui .card .value { color: #38bdf8; }
-					body.specs-mode .switch-btn {
-						background: rgba(12, 28, 48, 0.8);
-						border-color: rgba(56, 189, 248, 0.4);
-						color: #38bdf8;
+					body.specs-mode #window-ui .header { border-bottom-color: rgba(120, 150, 175, 0.4); }
+					body.specs-mode #window-ui .header h1 { color: #9bb3c8; }
+					body.specs-mode #window-ui .header p { color: #94a3b8; }
+					body.specs-mode #window-ui .card { background: rgba(22, 30, 38, 0.72); border-color: rgba(120, 150, 175, 0.3); }
+					body.specs-mode #window-ui .card h3 { color: #7f93a4; }
+					body.specs-mode #window-ui .card .value { color: #b0cada; }
+					body.specs-mode .switch-btn, body.specs-mode .volume-box {
+						background: rgba(22, 30, 38, 0.85); border-color: rgba(120, 150, 175, 0.4); color: #b0cada;
 					}
-					body.specs-mode .switch-btn:hover {
-						background: rgba(56, 189, 248, 0.2);
-					}
-					body.specs-mode .version-tag {
-						border-color: rgba(56, 189, 248, 0.2);
-						color: rgba(56, 189, 248, 0.7);
-					}
+					body.specs-mode .volume-slider::-webkit-slider-thumb { background: #b0cada; }
+					body.specs-mode .volume-label { color: #b0cada; }
+					body.specs-mode .switch-btn:hover { background: rgba(120, 150, 175, 0.2); }
+					body.specs-mode .version-tag { border-color: rgba(120, 150, 175, 0.2); color: rgba(176, 202, 218, 0.6); }
 
-					/* --- 2. OVERLAY MODE --- */
 					#overlay-ui {
-						display: none;
-						width: 100vw; height: 100vh;
-						background: #0d0e15;
-						border: 2px solid #00ff88;
-						border-radius: 8px;
-						padding: 8px 12px;
-						position: relative;
-						box-sizing: border-box;
-						cursor: move;
-						-webkit-app-region: drag;
+						display: none; width: 100vw; height: 100vh;
+						background: rgba(16, 12, 22, 0.92); border: 1.5px solid #e0995e;
+						border-radius: 8px; padding: 8px 12px; position: relative;
+						box-sizing: border-box; cursor: move; -webkit-app-region: drag;
 					}
-					.osd-grid {
-						display: grid;
-						grid-template-columns: repeat(2, 1fr);
-						gap: 4px 12px;
-						height: 100%;
-						align-content: center;
-					}
+					.osd-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 12px; height: 100%; align-content: center; }
 					.osd-item { display: flex; align-items: center; gap: 6px; font-weight: bold; }
-					.osd-lbl { font-size: 0.72rem; color: #00ff88; }
+					.osd-lbl { font-size: 0.72rem; color: #f0be81; }
 					.osd-val { font-size: 0.85rem; color: #ffffff; }
-
 					.restore-btn {
 						position: absolute; top: 4px; right: 6px;
-						background: rgba(255, 80, 40, 0.9); color: #fff;
+						background: rgba(200, 75, 50, 0.85); color: #fff;
 						border: none; border-radius: 4px; font-size: 0.65rem;
 						padding: 2px 6px; cursor: pointer; z-index: 99;
-						opacity: 0; transition: opacity 0.2s ease;
-						-webkit-app-region: no-drag;
+						opacity: 0; transition: opacity 0.2s ease; -webkit-app-region: no-drag;
 					}
 					#overlay-ui:hover .restore-btn { opacity: 1; }
-
 					body.overlay-mode #window-ui { display: none !important; }
 					body.overlay-mode #overlay-ui { display: flex !important; }
 				</style>
 			</head>
 			<body oncontextmenu="return false;" onmousedown="handleDrag(event)">
-				
-				<!-- 1. Window Mode UI -->
 				<div id="window-ui">
 					<div class="overlay"></div>
 					<div class="container">
@@ -571,13 +481,17 @@ void StartServer() {
 					</div>
 					<div class="controls-bar">
 						<button class="switch-btn" id="btn-toggle" onclick="toggleView()">&#x21BB; Specs</button>
+						<button class="switch-btn" id="btn-audio" onclick="toggleAudio()">&#128066; Mute BGM</button>
+						<div class="volume-box">
+							<span style="font-size: 0.9rem;">&#128066;</span>
+							<input type="range" id="vol-slider" class="volume-slider" min="0" max="100" value="100" oninput="changeVolume(this.value)">
+							<span id="vol-txt" class="volume-label">100%</span>
+						</div>
 						<button class="switch-btn" onclick="setMode('overlay')">&#128159; Overlay</button>
-						<button class="switch-btn" onclick="playVoice()">&#128266; Voice</button>
 					</div>
 					<a href="https://github.com/xiaokuai0915/System-Monitor-App" target="_blank" class="version-tag">v1.2.0</a>
 				</div>
 
-				<!-- 2. Overlay Mode UI -->
 				<div id="overlay-ui">
 					<button class="restore-btn" onclick="setMode('window')">&#128450; Restore</button>
 					<div class="osd-grid">
@@ -595,13 +509,9 @@ void StartServer() {
 
 					function handleDrag(e) {
 						if (currentMode === 'overlay' && e.button === 0 && e.target.tagName !== 'BUTTON') {
-							if (window.nativeDrag) {
-								window.nativeDrag();
-							}
+							if (window.nativeDrag) window.nativeDrag();
 						}
 					}
-
-					function playVoice() { fetch('/api/play_voice').catch(err => console.error(err)); }
 
 					function setMode(mode) {
 						fetch('/api/set_mode?m=' + mode).then(() => {
@@ -613,6 +523,24 @@ void StartServer() {
 					function applyModeStyles(mode) {
 						document.body.classList.remove('overlay-mode');
 						if (mode === 'overlay') document.body.classList.add('overlay-mode');
+					}
+
+					function toggleAudio() {
+						fetch('/api/toggle_audio')
+							.then(res => res.json())
+							.then(data => {
+								const btn = document.getElementById('btn-audio');
+								if (data.isMuted) {
+									btn.innerHTML = '&#128067; Unmute BGM';
+								} else {
+									btn.innerHTML = '&#128066; Mute BGM';
+								}
+							});
+					}
+
+					function changeVolume(val) {
+						document.getElementById('vol-txt').innerText = val + '%';
+						fetch('/api/set_volume?v=' + val);
 					}
 
 					function toggleView() {
@@ -680,6 +608,19 @@ void StartServer() {
 								document.getElementById('ov-gpu').innerText = gpu;
 								document.getElementById('ov-gputemp').innerText = temp;
 
+								const audioBtn = document.getElementById('btn-audio');
+								if (data.isMuted) {
+									audioBtn.innerHTML = '&#128067; Unmute BGM';
+								} else {
+									audioBtn.innerHTML = '&#128066; Mute BGM';
+								}
+
+								const slider = document.getElementById('vol-slider');
+								if (document.activeElement !== slider) {
+									slider.value = data.volume;
+									document.getElementById('vol-txt').innerText = data.volume + '%';
+								}
+
 								if (data.mode === 0 && currentMode !== 'window') { currentMode = 'window'; applyModeStyles('window'); }
 								else if (data.mode === 1 && currentMode !== 'overlay') { currentMode = 'overlay'; applyModeStyles('overlay'); }
 							})
@@ -692,21 +633,18 @@ void StartServer() {
 			</body>
 			</html>
 		)rawhtml");
-		page.set_header("Content-Type", "text/html"); // set the content type header to text/html
+		page.set_header("Content-Type", "text/html");
 		return page;
-			});
+		});
 
-	app.port(18080).multithreaded().run(); // run the Crow application on port 18080 with multithreading enabled
+	app.port(18080).multithreaded().run();
 }
 
 int main() {
-	std::thread serverThread(StartServer); // start the web server in a separate thread
-	serverThread.detach(); // detach the server thread so it runs independently
+	std::thread serverThread(StartServer);
+	serverThread.detach();
 
-	Sleep(500);
-	PlayRandomVoiceLine(); // play random voiceline during startup
-
-	webview::webview w(false, nullptr); // create a webview window (not resizable, no parent window)
+	webview::webview w(false, nullptr);
 	w.set_title("System Hardware Monitor");
 	w.set_size(1600, 900, WEBVIEW_HINT_NONE);
 
@@ -720,24 +658,26 @@ int main() {
 
 	w.navigate("http://127.0.0.1:18080");
 
-	g_hwndWebview = FindWindowA(nullptr, "System Hardware Monitor"); // find the window handle of the webview window by its title
+	g_hwndWebview = FindWindowA(nullptr, "System Hardware Monitor");
 	if (g_hwndWebview) {
 		g_oldWndProc = (WNDPROC)SetWindowLongPtrA(g_hwndWebview, GWLP_WNDPROC, (LONG_PTR)SubclassWndProc);
 
 		HICON hIcon = (HICON)LoadImageA(
-			GetModuleHandle(NULL), // load the icon from the resources
-			MAKEINTRESOURCEA(IDI_APP_ICON), // the resource ID of the icon
-			IMAGE_ICON, // specify that we are loading an icon
-			GetSystemMetrics(SM_CXICON), // get the width of the icon
-			GetSystemMetrics(SM_CYICON), // get the height of the icon
-			LR_DEFAULTCOLOR // use the default color format for the icon
+			GetModuleHandle(NULL),
+			MAKEINTRESOURCEA(IDI_APP_ICON),
+			IMAGE_ICON,
+			GetSystemMetrics(SM_CXICON),
+			GetSystemMetrics(SM_CYICON),
+			LR_DEFAULTCOLOR
 		);
 		if (hIcon) {
-			SendMessage(g_hwndWebview, WM_SETICON, ICON_BIG, (LPARAM)hIcon); // set the big icon for the window
-			SendMessage(g_hwndWebview, WM_SETICON, ICON_SMALL, (LPARAM)hIcon); // set the small icon for the window
+			SendMessage(g_hwndWebview, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
+			SendMessage(g_hwndWebview, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
 		}
 	}
 
 	w.run();
+
+	PlaySoundA(NULL, 0, 0);
 	return 0;
 }
