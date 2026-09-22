@@ -492,7 +492,7 @@ void StartServer() {
 						border-radius: 12px; background: rgba(0, 0, 0, 0.2); border: 1px solid rgba(255, 255, 255, 0.08);
 					}
 
-					/* --- SPECS MODE STYLES (完整深蓝视觉匹配) --- */
+					/* --- SPECS MODE STYLES --- */
 					body.specs-mode #window-ui { background-image: url('/assets/mascot2.jpg'); }
 					body.specs-mode #window-ui .overlay {
 						background: linear-gradient(90deg, rgba(12, 24, 42, 0.92) 0%, rgba(12, 24, 42, 0.65) 45%, rgba(12, 24, 42, 0.15) 100%);
