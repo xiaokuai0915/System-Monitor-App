@@ -34,6 +34,9 @@ END
 #endif
 
 IDI_APP_ICON            ICON                    "assets/app.ico"
-IDR_VOICE               WAVE                    "assets/voice.wav"
+IDR_WAVE1               WAVE                    "assets/song1.wav"
+IDR_WAVE2               WAVE                    "assets/song2.wav"
+IDR_WAVE3               WAVE                    "assets/song3.wav"
+IDR_WAVE4               WAVE                    "assets/song4.wav"
 IDR_MASCOT1_IMG         RCDATA                  "assets/mascot.jpg"
 IDR_MASCOT2_IMG         RCDATA                  "assets/mascot2.jpg"

@@ -11,6 +11,7 @@
 #include <atomic>
 #include <sysinfoapi.h>
 #include <processthreadsapi.h>
+#include <random> 
 
 #include <iostream>
 #include <fstream>
@@ -38,6 +39,8 @@ enum AppMode {
 std::atomic<AppMode> g_currentMode{ MODE_WINDOW };
 std::atomic<bool> g_isMuted{ false };
 std::atomic<int> g_bgmVolume{ 100 };
+std::atomic<bool> g_stopBgmThread{ false };
+
 HWND g_hwndWebview = NULL;
 WNDPROC g_oldWndProc = NULL;
 
@@ -67,16 +70,33 @@ void SetBGMVolume(int volPercent) {
 	waveOutSetVolume(NULL, fullVol);
 }
 
+void BGMThreadFunc() {
+	std::vector<int> tracks = { IDR_WAVE1, IDR_WAVE2, IDR_WAVE3, IDR_WAVE4 };
+	std::random_device rd;
+	std::mt19937 gen(rd());
+
+	while (!g_stopBgmThread) {
+		std::uniform_int_distribution<> dis(0, tracks.size() - 1);
+		int trackId = tracks[dis(gen)];
+		PlaySoundA(MAKEINTRESOURCEA(trackId), GetModuleHandle(NULL), SND_RESOURCE | SND_SYNC);
+
+		if (g_stopBgmThread) break;
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	}
+}
+
 void PlayBGM() {
-	PlaySoundA(MAKEINTRESOURCEA(IDR_VOICE), GetModuleHandle(NULL), SND_RESOURCE | SND_ASYNC | SND_LOOP);
+	g_isMuted = false;
 	SetBGMVolume(g_bgmVolume.load());
 }
 
 void StopBGM() {
+	g_isMuted = true;
 	SetBGMVolume(g_bgmVolume.load());
 }
 
 void ResumeBGM() {
+	g_isMuted = false;
 	SetBGMVolume(g_bgmVolume.load());
 }
 
@@ -294,6 +314,9 @@ CpuUsage cpuUsage;
 void StartServer() {
 	crow::SimpleApp app;
 
+	std::thread bgmThread(BGMThreadFunc);
+	bgmThread.detach();
+
 	PlayBGM();
 
 	CROW_ROUTE(app, "/assets/mascot.jpg")([]() {
@@ -337,14 +360,8 @@ void StartServer() {
 		});
 
 	CROW_ROUTE(app, "/api/toggle_audio")([]() {
-		if (g_isMuted) {
-			g_isMuted = false;
-			ResumeBGM();
-		}
-		else {
-			g_isMuted = true;
-			StopBGM();
-		}
+		if (g_isMuted) ResumeBGM();
+		else StopBGM();
 		crow::json::wvalue res;
 		res["isMuted"] = g_isMuted.load();
 		return res;
@@ -380,77 +397,76 @@ void StartServer() {
 					}
 					#window-ui .overlay {
 						position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-						background: linear-gradient(90deg, rgba(16, 12, 22, 0.92) 0%, rgba(16, 12, 22, 0.65) 45%, rgba(16, 12, 22, 0.1) 100%);
+						background: linear-gradient(90deg, rgba(16, 28, 20, 0.92) 0%, rgba(16, 28, 20, 0.65) 45%, rgba(16, 28, 20, 0.1) 100%);
 						transition: background 0.5s ease; z-index: 1;
 					}
 					#window-ui .container { position: relative; z-index: 2; max-width: 500px; width: 100%; }
-					.header { margin-bottom: 28px; border-bottom: 2px solid rgba(224, 153, 94, 0.4); padding-bottom: 12px; }
-					.header h1 { font-size: 2.3rem; color: #f4b266; font-weight: 700; letter-spacing: 0.5px; }
-					.header p { font-size: 0.95rem; color: #d2c4bc; margin-top: 4px; }
+					.header { margin-bottom: 28px; border-bottom: 2px solid rgba(138, 190, 140, 0.4); padding-bottom: 12px; }
+					.header h1 { font-size: 2.3rem; color: #a4e4b0; font-weight: 700; letter-spacing: 0.5px; }
+					.header p { font-size: 0.95rem; color: #c4d6c8; margin-top: 4px; }
 					.grid-container { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
 					.card {
-						background: rgba(25, 18, 30, 0.68); border: 1px solid rgba(224, 153, 94, 0.3);
+						background: rgba(18, 30, 22, 0.68); border: 1px solid rgba(138, 190, 140, 0.3);
 						backdrop-filter: blur(16px); border-radius: 16px; padding: 22px 24px;
 						box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45); transition: all 0.3s ease;
 					}
 					.card.full-width { grid-column: span 2; }
-					.card h3 { font-size: 0.8rem; color: #a4948a; text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 8px; }
-					.card .value { font-size: 1.8rem; font-weight: 700; color: #f0be81; }
-					.card .unit { font-size: 1rem; color: #d2c4bc; font-weight: 400; }
+					.card h3 { font-size: 0.8rem; color: #8ba993; text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 8px; }
+					.card .value { font-size: 1.8rem; font-weight: 700; color: #8ae0a0; }
+					.card .unit { font-size: 1rem; color: #c4d6c8; font-weight: 400; }
 					.controls-bar { position: fixed; bottom: 35px; left: 60px; z-index: 10; display: flex; align-items: center; gap: 12px; }
 					.switch-btn {
-						background: rgba(25, 18, 30, 0.85); border: 1px solid rgba(224, 153, 94, 0.4);
-						color: #f0be81; padding: 12px 22px; border-radius: 24px; cursor: pointer;
+						background: rgba(18, 30, 22, 0.85); border: 1px solid rgba(138, 190, 140, 0.4);
+						color: #8ae0a0; padding: 12px 22px; border-radius: 24px; cursor: pointer;
 						font-size: 0.88rem; font-weight: 600; backdrop-filter: blur(12px); transition: all 0.2s ease;
 					}
-					.switch-btn:hover { transform: translateY(-2px); background: rgba(224, 153, 94, 0.2); }
+					.switch-btn:hover { transform: translateY(-2px); background: rgba(138, 190, 140, 0.2); }
 					.volume-box {
 						display: flex; align-items: center; gap: 8px;
-						background: rgba(25, 18, 30, 0.85); border: 1px solid rgba(224, 153, 94, 0.4);
+						background: rgba(18, 30, 22, 0.85); border: 1px solid rgba(138, 190, 140, 0.4);
 						padding: 8px 16px; border-radius: 24px; backdrop-filter: blur(12px);
 					}
 					.volume-slider {
 						-webkit-appearance: none; width: 90px; height: 5px; border-radius: 5px;
-						background: rgba(224, 153, 94, 0.3); outline: none; transition: background 0.2s;
+						background: rgba(138, 190, 140, 0.3); outline: none; transition: background 0.2s;
 					}
 					.volume-slider::-webkit-slider-thumb {
 						-webkit-appearance: none; appearance: none; width: 14px; height: 14px;
-						border-radius: 50%; background: #f0be81; cursor: pointer; transition: transform 0.1s;
+						border-radius: 50%; background: #8ae0a0; cursor: pointer; transition: transform 0.1s;
 					}
 					.volume-slider::-webkit-slider-thumb:hover { transform: scale(1.2); }
-					.volume-label { font-size: 0.8rem; color: #f0be81; min-width: 38px; font-weight: 600; }
+					.volume-label { font-size: 0.8rem; color: #8ae0a0; min-width: 38px; font-weight: 600; }
 					.version-tag {
 						position: fixed; bottom: 25px; right: 30px; z-index: 10; font-size: 0.85rem;
-						color: rgba(240, 190, 129, 0.5); text-decoration: none; padding: 6px 12px;
-						border-radius: 12px; background: rgba(0, 0, 0, 0.25); border: 1px solid rgba(224, 153, 94, 0.15);
+						color: rgba(138, 224, 160, 0.5); text-decoration: none; padding: 6px 12px;
+						border-radius: 12px; background: rgba(0, 0, 0, 0.25); border: 1px solid rgba(138, 190, 140, 0.15);
 					}
+					
+					/* ==== PAGE 2 ==== */
 					body.specs-mode #window-ui { background-image: url('/assets/mascot2.jpg'); }
-					body.specs-mode #window-ui .overlay {
-						background: linear-gradient(90deg, rgba(20, 26, 31, 0.93) 0%, rgba(20, 26, 31, 0.7) 45%, rgba(20, 26, 31, 0.15) 100%);
-					}
-					body.specs-mode #window-ui .header { border-bottom-color: rgba(120, 150, 175, 0.4); }
-					body.specs-mode #window-ui .header h1 { color: #9bb3c8; }
-					body.specs-mode #window-ui .header p { color: #94a3b8; }
-					body.specs-mode #window-ui .card { background: rgba(22, 30, 38, 0.72); border-color: rgba(120, 150, 175, 0.3); }
-					body.specs-mode #window-ui .card h3 { color: #7f93a4; }
-					body.specs-mode #window-ui .card .value { color: #b0cada; }
-					body.specs-mode .switch-btn, body.specs-mode .volume-box {
-						background: rgba(22, 30, 38, 0.85); border-color: rgba(120, 150, 175, 0.4); color: #b0cada;
-					}
-					body.specs-mode .volume-slider::-webkit-slider-thumb { background: #b0cada; }
-					body.specs-mode .volume-label { color: #b0cada; }
-					body.specs-mode .switch-btn:hover { background: rgba(120, 150, 175, 0.2); }
-					body.specs-mode .version-tag { border-color: rgba(120, 150, 175, 0.2); color: rgba(176, 202, 218, 0.6); }
+					body.specs-mode #window-ui .overlay { background: linear-gradient(90deg, rgba(28, 16, 35, 0.93) 0%, rgba(28, 16, 35, 0.7) 45%, rgba(28, 16, 35, 0.15) 100%); }
+					body.specs-mode #window-ui .header { border-bottom-color: rgba(190, 140, 240, 0.4); }
+					body.specs-mode #window-ui .header h1 { color: #d6a4e4; }
+					body.specs-mode #window-ui .header p { color: #d0c4d6; }
+					body.specs-mode #window-ui .card { background: rgba(28, 16, 35, 0.72); border-color: rgba(190, 140, 240, 0.3); }
+					body.specs-mode #window-ui .card h3 { color: #a98ba9; }
+					body.specs-mode #window-ui .card .value { color: #d68ae0; }
+					body.specs-mode .switch-btn, body.specs-mode .volume-box { background: rgba(28, 16, 35, 0.85); border-color: rgba(190, 140, 240, 0.4); color: #d68ae0; }
+					body.specs-mode .volume-slider::-webkit-slider-thumb { background: #d68ae0; }
+					body.specs-mode .volume-label { color: #d68ae0; }
+					body.specs-mode .switch-btn:hover { background: rgba(190, 140, 240, 0.2); }
+					body.specs-mode .version-tag { border-color: rgba(190, 140, 240, 0.2); color: rgba(214, 138, 224, 0.6); }
 
+					/* ==== OVERLAY MODE ==== */
 					#overlay-ui {
 						display: none; width: 100vw; height: 100vh;
-						background: rgba(16, 12, 22, 0.92); border: 1.5px solid #e0995e;
+						background: rgba(16, 28, 20, 0.92); border: 1.5px solid #8ae0a0;
 						border-radius: 8px; padding: 8px 12px; position: relative;
 						box-sizing: border-box; cursor: move; -webkit-app-region: drag;
 					}
 					.osd-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 12px; height: 100%; align-content: center; }
 					.osd-item { display: flex; align-items: center; gap: 6px; font-weight: bold; }
-					.osd-lbl { font-size: 0.72rem; color: #f0be81; }
+					.osd-lbl { font-size: 0.72rem; color: #8ae0a0; }
 					.osd-val { font-size: 0.85rem; color: #ffffff; }
 					.restore-btn {
 						position: absolute; top: 4px; right: 6px;
@@ -481,7 +497,7 @@ void StartServer() {
 					</div>
 					<div class="controls-bar">
 						<button class="switch-btn" id="btn-toggle" onclick="toggleView()">&#x21BB; Specs</button>
-						<button class="switch-btn" id="btn-audio" onclick="toggleAudio()">&#128066; Mute BGM</button>
+						<button class="switch-btn" id="btn-audio" onclick="toggleAudio()">&#128066; Mute</button>
 						<div class="volume-box">
 							<span style="font-size: 0.9rem;">&#128066;</span>
 							<input type="range" id="vol-slider" class="volume-slider" min="0" max="100" value="100" oninput="changeVolume(this.value)">
@@ -530,11 +546,8 @@ void StartServer() {
 							.then(res => res.json())
 							.then(data => {
 								const btn = document.getElementById('btn-audio');
-								if (data.isMuted) {
-									btn.innerHTML = '&#128067; Unmute BGM';
-								} else {
-									btn.innerHTML = '&#128066; Mute BGM';
-								}
+								if (data.isMuted) btn.innerHTML = '&#128067; Unmute';
+								else btn.innerHTML = '&#128066; Mute';
 							});
 					}
 
@@ -610,9 +623,9 @@ void StartServer() {
 
 								const audioBtn = document.getElementById('btn-audio');
 								if (data.isMuted) {
-									audioBtn.innerHTML = '&#128067; Unmute BGM';
+									audioBtn.innerHTML = '&#128067; Unmute';
 								} else {
-									audioBtn.innerHTML = '&#128066; Mute BGM';
+									audioBtn.innerHTML = '&#128066; Mute';
 								}
 
 								const slider = document.getElementById('vol-slider');
@@ -675,9 +688,11 @@ int main() {
 			SendMessage(g_hwndWebview, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
 		}
 	}
-
 	w.run();
 
-	PlaySoundA(NULL, 0, 0);
+	g_stopBgmThread = true;
+	PlaySoundA(NULL, 0, SND_ASYNC);
+	ExitProcess(0);
+
 	return 0;
 }
