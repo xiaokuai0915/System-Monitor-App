@@ -11,8 +11,8 @@ This project serves as a practical hands-on experiment in building a desktop app
 
 ### 🖼️ Preview (Not the lastest version)
 <p align="center">
-  <img src="https://cdn.discordapp.com/attachments/969865214076018772/1550811445187584062/image.png?ex=6aafb135&is=6aae5fb5&hm=2c70eec0520017987d27591ad86bc34c44253d9a8186920d325366d029e82bf1&" width="48%" alt="Preview 1" />
-  <img src="https://cdn.discordapp.com/attachments/969865214076018772/1550811445665472573/image.png?ex=6aafb135&is=6aae5fb5&hm=aebd2614901c43f1f8aa853e56ac438f35055195df4a168f7511cd838540d40c&" width="48%" alt="Preview 2" />
+  <img src="https://cdn.discordapp.com/attachments/969865214076018772/1550811445187584062/image.png?ex=6ac0d4b5&is=6abf8335&hm=c1c0e7b75358fabb7b12a2cd66c2de01e38f847df31131c05c938699a4773350&" width="48%" alt="Preview 1" />
+  <img src="https://cdn.discordapp.com/attachments/969865214076018772/1550811445665472573/image.png?ex=6ac0d4b5&is=6abf8335&hm=4935df0da6f1b5e9f02137bac39bb59663b7a74cedd4ef2e5ef823b637b2da7f&" width="48%" alt="Preview 2" />
 </p>
 
 ---
