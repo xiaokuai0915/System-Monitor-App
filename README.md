@@ -14,21 +14,17 @@ This project serves as a practical hands-on experiment in building a desktop app
   <tr>
     <td align="center" width="50%">
       <img src="assets/showcase.png" width="100%"><br>
-      <b>showcase</b>
     </td>
     <td align="center" width="50%">
       <img src="assets/showcase2.png" width="100%"><br>
-      <b>showcase2</b>
     </td>
   </tr>
   <tr>
     <td align="center" width="50%">
       <img src="assets/showcase3.png" width="100%"><br>
-      <b>showcase3</b>
     </td>
     <td align="center" width="50%">
       <img src="assets/showcase4.png" width="100%"><br>
-      <b>showcase4</b>
     </td>
   </tr>
 </table>
