@@ -1,10 +1,19 @@
 #define _CRT_SECURE_NO_WARNINGS 
 #pragma comment(linker, "/subsystem:windows /ENTRY:mainCRTStartup") 
-#pragma comment(lib, "winmm.lib") 
+#pragma comment(lib, "winmm.lib")
 
 #include <winsock2.h>
 #include <windows.h>
 #include <mmsystem.h> 
+#pragma comment(lib, "winmm.lib")
+
+#include <pdh.h>
+#include <pdhmsg.h>
+#pragma comment(lib, "pdh.lib")
+
+#include <comdef.h>
+#include <Wbemidl.h>
+#pragma comment(lib, "wbemuuid.lib")
 
 #include "resource.h" 
 #include <thread>
@@ -207,6 +216,154 @@ bool GetAmdGpuStats(double& usageOut, double& tempOut) {
 	return success;
 }
 
+double GetWmiThermalZoneTemp() {
+	double tempC = 0.0;
+	HRESULT hr = CoInitializeEx(0, COINIT_MULTITHREADED);
+	if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return 0.0;
+
+	IWbemLocator* pLoc = NULL;
+	hr = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLoc);
+
+	if (SUCCEEDED(hr)) {
+		IWbemServices* pSvc = NULL;
+		hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\WMI"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
+
+		if (SUCCEEDED(hr)) {
+			CoSetProxyBlanket(pSvc, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, NULL,
+				RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE);
+
+			IEnumWbemClassObject* pEnumerator = NULL;
+			hr = pSvc->ExecQuery(
+				bstr_t("WQL"),
+				bstr_t("SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature"),
+				WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator);
+
+			if (SUCCEEDED(hr) && pEnumerator) {
+				IWbemClassObject* pclsObj = NULL;
+				ULONG uReturn = 0;
+
+				while (pEnumerator) {
+					hr = pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn);
+					if (0 == uReturn) break;
+
+					VARIANT vtProp;
+					hr = pclsObj->Get(L"CurrentTemperature", 0, &vtProp, 0, 0);
+					if (SUCCEEDED(hr)) {
+						tempC = ((double)vtProp.ulVal / 10.0) - 273.15; // Tenths of Kelvin to Celsius
+						VariantClear(&vtProp);
+						pclsObj->Release();
+						break;
+					}
+					pclsObj->Release();
+				}
+				pEnumerator->Release();
+			}
+			pSvc->Release();
+		}
+		pLoc->Release();
+	}
+	return tempC;
+}
+
+typedef uint32_t ze_result_t;
+typedef struct _zes_device_handle_t* zes_device_handle_t;
+typedef struct _zes_driver_handle_t* zes_driver_handle_t;
+typedef struct _zes_temp_handle_t* zes_temp_handle_t;
+typedef ze_result_t(*zeInit_t)(uint32_t flags);
+typedef ze_result_t(*zesInit_t)(uint32_t flags);
+typedef ze_result_t(*zesDriverGet_t)(uint32_t* pCount, zes_driver_handle_t* phDrivers);
+typedef ze_result_t(*zesDeviceGet_t)(zes_driver_handle_t hDriver, uint32_t* pCount, zes_device_handle_t* phDevices);
+typedef ze_result_t(*zesDeviceEnumTemperatureSensors_t)(zes_device_handle_t hDevice, uint32_t* pCount, zes_temp_handle_t* phTemperature);
+typedef ze_result_t(*zesTemperatureGetState_t)(zes_temp_handle_t hTemperature, double* pTemperature);
+
+bool GetIntelGpuStats(double& usageOut, double& tempOut) {
+	bool tempSuccess = false;
+	bool usageSuccess = false;
+
+	HMODULE hZe = LoadLibraryA("ze_loader.dll");
+	if (hZe) {
+		auto zeInit = (zeInit_t)GetProcAddress(hZe, "zeInit");
+		auto zesInit = (zesInit_t)GetProcAddress(hZe, "zesInit");
+		auto zesDriverGet = (zesDriverGet_t)GetProcAddress(hZe, "zesDriverGet");
+		auto zesDeviceGet = (zesDeviceGet_t)GetProcAddress(hZe, "zesDeviceGet");
+		auto zesDeviceEnumTemp = (zesDeviceEnumTemperatureSensors_t)GetProcAddress(hZe, "zesDeviceEnumTemperatureSensors");
+		auto zesTempGetState = (zesTemperatureGetState_t)GetProcAddress(hZe, "zesTemperatureGetState");
+
+		if (zeInit && zeInit(0) == 0 && zesInit && zesInit(0) == 0) {
+			uint32_t driverCount = 1;
+			zes_driver_handle_t hDriver = nullptr;
+			if (zesDriverGet && zesDriverGet(&driverCount, &hDriver) == 0 && hDriver) {
+				uint32_t deviceCount = 1;
+				zes_device_handle_t hDevice = nullptr;
+				if (zesDeviceGet && zesDeviceGet(hDriver, &deviceCount, &hDevice) == 0 && hDevice) {
+					if (zesDeviceEnumTemp && zesTempGetState) {
+						uint32_t tempCount = 0;
+						zesDeviceEnumTemp(hDevice, &tempCount, nullptr);
+						if (tempCount > 0) {
+							std::vector<zes_temp_handle_t> hTemps(tempCount);
+							zesDeviceEnumTemp(hDevice, &tempCount, hTemps.data());
+							double tempValue = 0.0;
+							if (zesTempGetState(hTemps[0], &tempValue) == 0) {
+								tempOut = tempValue;
+								tempSuccess = true;
+							}
+						}
+					}
+				}
+			}
+		}
+		else {
+			double fallbackTemp = GetWmiThermalZoneTemp();
+			if (fallbackTemp > 0.0) {
+				tempOut = fallbackTemp;
+				tempSuccess = true;
+			}
+		}
+		FreeLibrary(hZe);
+	}
+
+	static PDH_HQUERY pdhQuery = NULL;
+	static PDH_HCOUNTER pdhCounter = NULL;
+	static bool pdhInitialized = false;
+
+	if (!pdhInitialized) {
+		if (PdhOpenQueryA(NULL, 0, &pdhQuery) == ERROR_SUCCESS) {
+			if (PdhAddEnglishCounterA(pdhQuery, "\\GPU Engine(*engtype_3D*)\\Utilization Percentage", 0, &pdhCounter) == ERROR_SUCCESS) {
+				PdhCollectQueryData(pdhQuery);
+				pdhInitialized = true;
+			}
+		}
+	}
+
+	if (pdhInitialized) {
+		if (PdhCollectQueryData(pdhQuery) == ERROR_SUCCESS) {
+			DWORD bufferSize = 0;
+			DWORD itemCount = 0;
+
+			PdhGetFormattedCounterArrayA(pdhCounter, PDH_FMT_DOUBLE, &bufferSize, &itemCount, NULL);
+
+			if (bufferSize > 0) {
+				std::vector<char> buffer(bufferSize);
+				PPDH_FMT_COUNTERVALUE_ITEM_A pItems = (PPDH_FMT_COUNTERVALUE_ITEM_A)buffer.data();
+
+				if (PdhGetFormattedCounterArrayA(pdhCounter, PDH_FMT_DOUBLE, &bufferSize, &itemCount, pItems) == ERROR_SUCCESS) {
+					double maxUsage = 0.0;
+					for (DWORD i = 0; i < itemCount; i++) {
+						if (pItems[i].FmtValue.CStatus == PDH_CSTATUS_VALID_DATA || pItems[i].FmtValue.CStatus == PDH_CSTATUS_NEW_DATA) {
+							if (pItems[i].FmtValue.doubleValue > maxUsage) {
+								maxUsage = pItems[i].FmtValue.doubleValue;
+							}
+						}
+					}
+					usageOut = maxUsage;
+					usageSuccess = true;
+				}
+			}
+		}
+	}
+	return (tempSuccess || usageSuccess);
+}
+
 struct nvmlUtilization_t { unsigned int gpu; unsigned int memory; };
 typedef int (*nvmlInit_t)();
 typedef int (*nvmlShutdown_t)();
@@ -242,6 +399,7 @@ void GetGpuStats(double& usageOut, double& tempOut) {
 		FreeLibrary(hNvml);
 	}
 	GetAmdGpuStats(usageOut, tempOut);
+	GetIntelGpuStats(usageOut, tempOut);
 }
 
 std::string GetRealCpuName() {
