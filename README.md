@@ -1,7 +1,5 @@
 # System Monitor App 🖥️
 
-> **Status:** 🚧 Work in Progress (Still in active development)
-
 A lightweight C++ desktop system monitor application built for personal learning—specifically to explore how to integrate modern front-end web technologies with a native C++ backend.
 ---
 
